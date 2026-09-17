@@ -19,8 +19,9 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 1 complete: repo skeleton + infrastructure containers (Postgres, Redis, RabbitMQ).
-No application code runs yet — `api` and `worker` services get added to Compose in
+Phase 2 complete: infrastructure containers plus a versioned schema — `users`,
+`jobs`, `job_attempts` defined as SQLAlchemy models and created by an Alembic
+migration. No API yet; `api` and `worker` services get added to Compose in
 Phase 3 / Phase 7.
 
 ## Local setup
@@ -33,14 +34,50 @@ docker compose up -d
 docker compose ps
 ```
 
+Then edit `.env` to point at the **published host ports** rather than the
+Docker-network hostnames — the backend runs on your machine until Phase 13:
+
+```
+DATABASE_URL=postgresql://taskflow:taskflow_dev_password@localhost:5433/taskflow
+REDIS_URL=redis://localhost:6379/0
+RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+```
+
+> Postgres is published on host port **5433**, not 5432, because a natively
+> installed PostgreSQL service already owns 5432 on this machine. Inside the
+> Compose network the port is still 5432, which is why `.env.example` keeps
+> `postgres:5432`.
+
+### Backend environment
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # PowerShell; use source .venv/bin/activate elsewhere
+pip install -r requirements.txt
+alembic upgrade head                 # run from backend/
+```
+
 ### Verify the infrastructure
 
 ```bash
-docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "SELECT 1;"   # -> 1 row
-docker exec taskflow-redis-1 redis-cli ping                                    # -> PONG
+docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "\dt"   # 4 tables
+docker exec taskflow-redis-1 redis-cli ping                              # -> PONG
 ```
 
 RabbitMQ management UI: http://localhost:15672 (guest / guest).
+
+### Migrations
+
+All Alembic commands run from `backend/`:
+
+```bash
+alembic revision --autogenerate -m "describe the change"   # create a migration
+alembic upgrade head                                        # apply
+alembic downgrade -1                                        # roll back one
+alembic current                                             # what's applied
+alembic check                                               # models vs DB drift
+```
 
 ### Shut down
 
@@ -55,6 +92,10 @@ docker compose down -v     # also drops the database volume
 taskflow/
 ├── backend/
 │   ├── app/          # FastAPI application
+│   │   ├── config.py     # env-driven settings
+│   │   ├── db.py         # SQLAlchemy engine/session
+│   │   └── models/       # User, Job, JobAttempt
+│   ├── alembic/      # migration environment + versions/
 │   ├── worker/       # queue consumer + job handlers
 │   └── tests/
 ├── frontend/         # React dashboard
