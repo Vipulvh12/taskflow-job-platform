@@ -142,20 +142,29 @@ arguments, so two modules declaring `jobs` independently is a
 
 ### Failure taxonomy
 
-| Failure | Status | Retried? | Reaches DLQ? |
+| Failure | Job status | Attempts | Reaches DLQ? |
 |---|---|---|---|
-| `HandlerError` (handler rejected its input) | `FAILED` | no | no |
-| Any other exception | `RETRYING` → … → `DEAD` | yes | yes |
-| No handler registered for the type | `RETRYING` → … → `DEAD` | yes | yes |
+| `HandlerError` (handler rejected its input) | `DEAD` | 1 | yes |
+| No handler registered for the type | `DEAD` | 1 | yes |
+| Any other exception | `RETRYING` → … → `DEAD` | 3 | yes |
+| Queue publish failed at submission | `FAILED` | 0 | no |
 
-A `HandlerError` means the payload is wrong, and the payload is immutable — the
-same input would be rejected identically three times, 30 seconds apart. Those
-fail once and stop. The DLQ is reserved for jobs that might still succeed if
-re-run, which is what makes a manual-retry admin view (V2) meaningful.
+**A job that ran and died always rests at `DEAD`.** `FAILED` means the job never
+ran at all — the Phase 6 case where the row committed but the publish failed, so
+no worker ever saw it. One status and one queue to look at for failed work;
+`attempt_count = 0` still distinguishes the never-ran case.
 
-A missing handler is deliberately treated as *transient*: it usually means a
-deploy hasn't rolled out yet, and parking the job in the DLQ is exactly what
-lets an admin re-run it once the handler ships.
+Permanent failures skip the retry ladder. A `HandlerError` means the payload is
+wrong, and the payload is immutable — the same input would be rejected
+identically three times, 30 seconds apart. A missing handler is the same story:
+this worker's registry is fixed for its lifetime, so attempts 2 and 3 look up the
+same missing key. If the handler is merely undeployed, the job is recoverable
+from the DLQ once it ships, which is the same remedy minus three wasted attempts.
+
+Note the two vocabularies are separate and always were: `job_attempts.status` is
+attempt-level (`SUCCESS`/`FAILED`) and records what happened on that try, while
+`jobs.status` records where the job as a whole came to rest. A `DEAD` job's
+attempt rows all read `FAILED`.
 
 Tune with `JOB_MAX_ATTEMPTS` (default 3, counting the first try) and
 `JOB_RETRY_DELAYS` (default `5,25`). Adding a tier requires the retry queue for

@@ -82,8 +82,13 @@ class JobResponse(BaseModel):
     type: str
     status: JobStatus
     priority: int
-    payload: dict[str, Any]
-    result: dict[str, Any] | None
+    # Typed Any, not dict, deliberately: JSONB accepts any JSON value, and a row
+    # written outside the API (a migration, a fix-up script, an operator) can
+    # hold a scalar. The request model is where "must be an object" is enforced;
+    # a READ must never 500 on data that exists, least of all for a dead job
+    # someone is trying to diagnose.
+    payload: Any
+    result: Any | None
     idempotency_key: str | None
     attempt_count: int
     created_at: datetime

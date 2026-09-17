@@ -59,13 +59,14 @@ def process_job(job_id: str) -> tuple[Disposition, int | None]:
 
         handler = get_handler(job.type)
         if handler is None:
-            # Retryable on purpose: a type the API accepts but this worker
-            # can't run is usually a deploy that hasn't rolled out yet.
-            # Exhausting retries parks it in the DLQ, where an admin can
-            # re-run it once the handler ships.
+            # Permanent: this worker's registry is fixed for its lifetime, so
+            # attempts 2 and 3 would look up the same missing key and fail
+            # identically. Burning the ladder buys nothing. If the handler is
+            # merely undeployed, the job is recoverable from the DLQ once it
+            # ships — which is the same remedy, minus three wasted attempts.
             return _fail(db, job, attempt_number, started_at,
                          f"No handler registered for job type '{job.type}'.",
-                         permanent=False)
+                         permanent=True)
 
         context = JobContext(
             job_id=job.id,
@@ -103,12 +104,16 @@ def _fail(db, job: Job, attempt_number: int, started_at: datetime,
 
     retries_left = attempt_number < settings.job_max_attempts
     if permanent:
-        job.status = JobStatus.FAILED.value
+        # DEAD, not FAILED. FAILED is reserved for a job that never ran at
+        # all — the Phase 6 case where the row committed but the publish
+        # failed. Anything that ran and died rests at DEAD, so an admin has
+        # exactly one status (and one queue) to look at for failed work.
+        job.status = JobStatus.DEAD.value
         job.completed_at = datetime.now(timezone.utc)
         db.commit()
-        logger.warning("Job %s failed permanently on attempt %d (no retry): %s",
+        logger.warning("Job %s DEAD (permanent failure) on attempt %d, no retry: %s",
                        job.id, attempt_number, error)
-        return Disposition.ACK, None
+        return Disposition.DEAD_LETTER, None
 
     if not retries_left:
         job.status = JobStatus.DEAD.value
@@ -191,14 +196,15 @@ def on_message(channel, method, properties, body):
 def _log_handler_coverage() -> None:
     """A job type the API accepts but this worker can't run is a real
     operational condition (a partial rollout), and it should be visible at
-    startup rather than discovered one failed job at a time."""
+    startup rather than discovered one dead job at a time — the more so now
+    that a missing handler kills a job on its first attempt."""
     available = set(registered_types())
     logger.info("Registered handlers: %s", ", ".join(sorted(available)) or "(none)")
     missing = sorted({t.value for t in JOB_PAYLOAD_SCHEMAS} - available)
     if missing:
         logger.warning(
-            "No handler for job type(s): %s — jobs of these types will retry, "
-            "then dead-letter.", ", ".join(missing),
+            "No handler for job type(s): %s — jobs of these types will go "
+            "straight to DEAD on their first attempt.", ", ".join(missing),
         )
 
 
