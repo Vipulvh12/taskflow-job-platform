@@ -32,6 +32,15 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class RateLimitError(AppError):
+    status_code = 429
+    code = "rate_limited"
+
+    def __init__(self, message: str, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(message)
+
+
 class UnauthorizedError(AppError):
     status_code = 401
     code = "unauthorized"

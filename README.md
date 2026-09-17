@@ -19,8 +19,8 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 5 complete: infrastructure, a versioned schema, a unified error envelope,
-authentication, and job submission with idempotency.
+Phase 5b complete: infrastructure, a versioned schema, a unified error envelope,
+authentication, job submission with idempotency, and Redis-backed rate limiting.
 
 **Submitted jobs stay `QUEUED` forever right now** — nothing publishes them to
 RabbitMQ (Phase 6) and no worker consumes them (Phase 7). That is expected at
@@ -94,8 +94,40 @@ would never find out. Sending different keys in the body and the
 - Per-type `payload` schemas are deliberately not defined yet — the handler that
   consumes a payload defines its contract, and those land in Phases 7 and 9.
   Today `payload` is validated as "a JSON object under 64KB".
-- Rate limiting is in the MVP scope but has no phase assigned in the roadmap; it
-  is not implemented yet.
+## Rate limiting
+
+| Endpoint | Limit | Keyed by |
+|---|---|---|
+| `POST /jobs` | 100 / 60s | authenticated user |
+| `POST /auth/login` | 10 / 60s | client IP |
+| `POST /auth/register` | 10 / 60s | client IP |
+
+Exceeding a limit returns `429` in the usual envelope (`"code": "rate_limited"`)
+plus a `Retry-After` header holding the seconds left in the window. Read
+endpoints are unlimited — they aren't the abuse surface here.
+
+Login and register are keyed by IP because a brute-force attacker has no session
+yet; that is the whole point of the attack. The limiter is a dependency, so it
+runs *before* the credential check — the 11th attempt is rejected whether or not
+the password is correct.
+
+Implementation is a fixed-window counter in `_check_rate_limit`
+([deps.py](backend/app/deps.py)). `INCR` and `EXPIRE … NX` go out in one
+pipeline: the naive `if INCR == 1: EXPIRE` version leaves a key incremented with
+no TTL if the process dies between the two calls, locking that caller out
+permanently until someone deletes the key by hand. `NX` also stops concurrent
+requests from pushing the expiry outward.
+
+**Known limitations:**
+- Fixed windows allow a ~2x burst across a boundary (100 requests at 0:59 plus
+  100 at 1:00). A sliding-window log or token bucket fixes it, at real cost.
+- `request.client.host` is the direct TCP peer. Correct while Uvicorn is exposed
+  directly; behind a reverse proxy every request would look like it came from
+  the proxy, and this would need a trusted `X-Forwarded-For` instead.
+
+Reset counters during development with
+`docker exec taskflow-redis-1 redis-cli FLUSHDB` (also clears idempotency keys
+and refresh tokens).
 
 ### Benchmarking gotcha
 

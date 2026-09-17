@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.enums import JobStatus, JobType
 from app.core.exceptions import BadRequestError
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, rate_limit_by_user
 from app.models.user import User
 from app.schemas.job import (
     JobCreateRequest,
@@ -36,7 +36,9 @@ def submit_job(
     body: JobCreateRequest,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    user: User = Depends(get_current_user),
+    # Write endpoint only — GET /jobs and GET /jobs/{id} stay on plain
+    # get_current_user; reads aren't the abuse surface here.
+    user: User = Depends(rate_limit_by_user("jobs:create", 100, 60)),
     db: Session = Depends(get_db),
 ):
     key = _resolve_idempotency_key(body.idempotency_key, idempotency_key)

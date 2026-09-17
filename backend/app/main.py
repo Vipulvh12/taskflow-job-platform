@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, RateLimitError
 from app.routers import auth, health, jobs
 
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +23,11 @@ app.include_router(jobs.router)
 
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError):
+    headers = {"Retry-After": str(exc.retry_after)} if isinstance(exc, RateLimitError) else None
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": exc.code, "message": exc.message}},
+        headers=headers,
     )
 
 
