@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.exceptions import AppError
-from app.routers import health
+from app.routers import auth, health
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow")
@@ -14,6 +14,7 @@ logger = logging.getLogger("taskflow")
 app = FastAPI(title="TaskFlow API")
 
 app.include_router(health.router)
+app.include_router(auth.router)
 
 
 @app.exception_handler(AppError)

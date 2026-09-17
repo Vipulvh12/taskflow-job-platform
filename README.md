@@ -19,10 +19,36 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 3 complete: infrastructure containers, a versioned schema (`users`, `jobs`,
-`job_attempts` via Alembic), and a FastAPI app that boots with a `/health`
-endpoint and a unified error envelope. No auth or job submission yet; the `api`
-and `worker` services get added to Compose in Phase 13 / Phase 7.
+Phase 4 complete: infrastructure containers, a versioned schema (`users`, `jobs`,
+`job_attempts` via Alembic), a FastAPI app with a unified error envelope, and
+working authentication. No job submission yet; the `api` and `worker` services
+get added to Compose in Phase 13 / Phase 7.
+
+## Auth
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /auth/register` | — | Create an account, returns a token pair |
+| `POST /auth/login` | — | Exchange credentials for a token pair |
+| `POST /auth/refresh` | — | Rotate a refresh token into a new pair |
+| `POST /auth/logout` | — | Revoke a refresh token (204) |
+| `GET /auth/me` | Bearer | The caller's own user record |
+
+Passwords are hashed with bcrypt (called directly, not via the unmaintained
+`passlib`). Access tokens are stateless 15-minute JWTs verified by signature
+alone. Refresh tokens last 7 days and are **revocable**: each carries a `jti`
+recorded in Redis as `refresh_token:<jti> -> user_id` with a matching TTL, so
+logout is real revocation rather than the client forgetting a string. Refreshing
+rotates — the presented token's `jti` is deleted and a brand-new pair issued.
+
+Protected routes depend on `get_current_user` (in [deps.py](backend/app/deps.py));
+admin-only routes will chain `require_admin` on top of it.
+
+**Known limitation (V2):** revocation deletes the Redis key, so a naturally
+expired refresh token and a replayed already-rotated one are indistinguishable
+— both are just "key not found". Real theft detection needs a short-lived
+blocklist of revoked `jti`s instead of deletion, so reuse-after-rotation can
+force a full logout.
 
 ### Error responses
 
