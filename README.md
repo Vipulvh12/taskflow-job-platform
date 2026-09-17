@@ -19,10 +19,24 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 2 complete: infrastructure containers plus a versioned schema — `users`,
-`jobs`, `job_attempts` defined as SQLAlchemy models and created by an Alembic
-migration. No API yet; `api` and `worker` services get added to Compose in
-Phase 3 / Phase 7.
+Phase 3 complete: infrastructure containers, a versioned schema (`users`, `jobs`,
+`job_attempts` via Alembic), and a FastAPI app that boots with a `/health`
+endpoint and a unified error envelope. No auth or job submission yet; the `api`
+and `worker` services get added to Compose in Phase 13 / Phase 7.
+
+### Error responses
+
+Every error the API can produce — business-logic errors, request validation
+failures, framework `HTTPException`s, and unhandled bugs — comes back in one
+shape, so the frontend needs exactly one error-parsing path:
+
+```json
+{"error": {"code": "not_found", "message": "Job 123 does not exist."}}
+```
+
+`code` is stable and machine-readable (`not_found`, `conflict`, `unauthorized`,
+`forbidden`, `validation_error`, `http_error`, `internal_error`); branch on it
+rather than on `message`.
 
 ## Local setup
 
@@ -78,6 +92,17 @@ alembic downgrade -1                                        # roll back one
 alembic current                                             # what's applied
 alembic check                                               # models vs DB drift
 ```
+
+### Run the API
+
+From `backend/`, with the venv active:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+- http://localhost:8000/health → `{"status":"ok"}`
+- http://localhost:8000/docs → Swagger UI
 
 ### Shut down
 
