@@ -19,12 +19,69 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 6 complete: infrastructure, a versioned schema, a unified error envelope,
-authentication, job submission with idempotency, rate limiting, and publishing
-to RabbitMQ on job creation.
+Phase 7 complete: jobs submitted through the API are published to RabbitMQ,
+consumed by a worker process, dispatched to a real handler, and written back to
+Postgres with a `job_attempts` row.
 
-**Messages pile up in the `jobs` queue and nothing drains them** — the worker
-lands in Phase 7. Submitted jobs stay `QUEUED`. That is expected, not a bug.
+**A failure is terminal right now** — no retry, no backoff, no dead-letter
+queue. Those land in Phase 8.
+
+## Running it
+
+Three processes: the infrastructure containers, the API, and at least one
+worker.
+
+```bash
+docker compose up -d                          # postgres, redis, rabbitmq
+cd backend && uvicorn app.main:app --reload --port 8000    # terminal 1
+cd backend && python -m worker.main                         # terminal 2
+```
+
+The worker must run as a module (`python -m worker.main`, from `backend/`), not
+as a script — that's what puts `backend/` on `sys.path` so both `app` and
+`worker` resolve.
+
+## The worker
+
+Consumes `{"job_id": ...}`, re-reads the row from Postgres, dispatches on
+`job.type` through a decorator registry (`@register("csv_process")`), and
+records the outcome as both a `jobs` status change and a `job_attempts` row.
+
+- **`prefetch_count=1`** — one unacked message at a time. Without it a single
+  worker buffers a batch and a slow job starves messages sitting in its private
+  queue while sibling workers idle.
+- **Idempotent dispatch** — a job already `SUCCESS` or `DEAD` is skipped and
+  acked. At-least-once delivery means redelivery is normal (worker crash,
+  connection drop between commit and ack); without this guard the handler would
+  run twice.
+- **Ack unconditionally** — `SUCCESS` and `FAILED` are both outcomes already
+  committed. Redelivery is only wanted when the worker *process* dies mid-job,
+  and then the ack line is never reached, so the broker's requeue-on-disconnect
+  covers it with no explicit nack logic.
+- **Handler exceptions are caught per job** — one bad payload must not kill the
+  consume loop.
+
+No auto-reconnect: a consuming connection notices a dead broker immediately
+(heartbeat frames), so it surfaces as a crash rather than the silent stale
+handle the API's idle connection suffers. Process restart is the right fix —
+`restart: unless-stopped` in Phase 13.
+
+### Handlers
+
+| Type | Payload | Result |
+|---|---|---|
+| `csv_process` | `{"csv_text": "<inline CSV>"}` | `row_count`, `column_count`, and per-column stats (`min`/`max`/`mean` for fully numeric columns, `non_null_count` otherwise) |
+| `pdf_generate` | — | Accepted by the API, **no handler yet** → fails at the worker. Phase 9. |
+
+CSV content travels inline in the payload under the existing 64KB cap; real file
+uploads and object storage are still deferred to V2.
+
+### Known gap
+
+A worker killed mid-job leaves that job at `RUNNING` forever — nothing detects
+an abandoned job until V2 heartbeats. Recover by hand:
+`UPDATE jobs SET status='QUEUED' WHERE id='...'` and republish, or just
+resubmit.
 
 ## Auth
 
