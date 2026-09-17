@@ -13,6 +13,15 @@ class AppError(Exception):
         super().__init__(message)
 
 
+class BadRequestError(AppError):
+    """For requests that are well-formed enough for Pydantic to accept but
+    are still invalid as a whole — e.g. two conflicting idempotency keys in
+    the same request. Pydantic validates fields; this covers the rest."""
+
+    status_code = 400
+    code = "bad_request"
+
+
 class NotFoundError(AppError):
     status_code = 404
     code = "not_found"

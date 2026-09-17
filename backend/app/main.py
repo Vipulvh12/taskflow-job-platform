@@ -6,15 +6,19 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.exceptions import AppError
-from app.routers import auth, health
+from app.routers import auth, health, jobs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow")
+
+# Where in the request an error occurred; useful to FastAPI, noise to clients.
+_LOC_SECTIONS = {"body", "query", "path", "header", "cookie"}
 
 app = FastAPI(title="TaskFlow API")
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(jobs.router)
 
 
 @app.exception_handler(AppError)
@@ -31,8 +35,16 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     # error into one readable message rather than exposing Pydantic's
     # internal error structure to API clients.
     first = exc.errors()[0]
-    field = ".".join(str(p) for p in first["loc"] if p != "body")
-    message = f"{field}: {first['msg']}" if field else first["msg"]
+    if first.get("type") == "json_invalid":
+        # loc here is ("body", <byte offset>) — an integer, not a field. Folding
+        # it in the usual way produces nonsense like "1: JSON decode error".
+        message = "Malformed JSON body."
+    else:
+        # Drop the request-part marker ("body"/"query"/"path"/"header") and any
+        # non-string element (list indices) so what's left reads as a field path.
+        parts = [p for p in first["loc"] if isinstance(p, str) and p not in _LOC_SECTIONS]
+        field = ".".join(parts)
+        message = f"{field}: {first['msg']}" if field else first["msg"]
     return JSONResponse(
         status_code=422,
         content={"error": {"code": "validation_error", "message": message}},

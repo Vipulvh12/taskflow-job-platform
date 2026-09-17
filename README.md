@@ -19,10 +19,12 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 4 complete: infrastructure containers, a versioned schema (`users`, `jobs`,
-`job_attempts` via Alembic), a FastAPI app with a unified error envelope, and
-working authentication. No job submission yet; the `api` and `worker` services
-get added to Compose in Phase 13 / Phase 7.
+Phase 5 complete: infrastructure, a versioned schema, a unified error envelope,
+authentication, and job submission with idempotency.
+
+**Submitted jobs stay `QUEUED` forever right now** — nothing publishes them to
+RabbitMQ (Phase 6) and no worker consumes them (Phase 7). That is expected at
+this point, not a bug.
 
 ## Auth
 
@@ -42,13 +44,65 @@ logout is real revocation rather than the client forgetting a string. Refreshing
 rotates — the presented token's `jti` is deleted and a brand-new pair issued.
 
 Protected routes depend on `get_current_user` (in [deps.py](backend/app/deps.py));
-admin-only routes will chain `require_admin` on top of it.
+admin-only routes will chain `require_admin` on top of it. Authorization reads
+`is_admin` from the database, not from the token's claim, so a demotion takes
+effect on the next request instead of when the access token expires.
 
 **Known limitation (V2):** revocation deletes the Redis key, so a naturally
 expired refresh token and a replayed already-rotated one are indistinguishable
 — both are just "key not found". Real theft detection needs a short-lived
 blocklist of revoked `jti`s instead of deletion, so reuse-after-rotation can
 force a full logout.
+
+## Jobs
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /jobs` | Submit a job. `201` if created, `200` if an idempotency key replayed an existing one |
+| `GET /jobs/{id}` | Full record incl. attempt history. Someone else's job reads as `404` |
+| `GET /jobs` | The caller's jobs, filterable by `status`/`type`, paginated via `page`/`page_size` (max 100) |
+
+```jsonc
+// POST /jobs
+{
+  "type": "csv_process",        // csv_process | pdf_generate
+  "payload": {"rows": 42},      // any JSON object, max 64KB
+  "priority": 5,                // 0-10, HIGHER = more urgent (matches RabbitMQ)
+  "idempotency_key": "abc-123"  // optional; also accepted as an Idempotency-Key header
+}
+```
+
+### Idempotency
+
+The guarantee is the `uq_jobs_user_idempotency_key` constraint, not the cache.
+Redis holds `idempotency:<user_id>:<key> -> job_id` for 24h purely to skip a
+doomed INSERT; wipe Redis entirely and behaviour is unchanged, because a
+duplicate still raises `IntegrityError` and the existing row is returned. Keys
+are scoped per user, so two users may use the same key.
+
+Replaying a key with a **different** `type`, `payload` or `priority` is a `409`,
+not a silent replay — otherwise the second job would never run and the client
+would never find out. Sending different keys in the body and the
+`Idempotency-Key` header is a `400`.
+
+### Notes / limitations
+
+- List rows omit `payload` and `result`; fetch the detail endpoint for those.
+- Pagination is offset-based, which is fine at this size but drifts under
+  concurrent inserts and degrades on deep pages. Keyset pagination is the fix
+  when it matters (Phase 14).
+- Per-type `payload` schemas are deliberately not defined yet — the handler that
+  consumes a payload defines its contract, and those land in Phases 7 and 9.
+  Today `payload` is validated as "a JSON object under 64KB".
+- Rate limiting is in the MVP scope but has no phase assigned in the roadmap; it
+  is not implemented yet.
+
+### Benchmarking gotcha
+
+Measure against `http://127.0.0.1:8000`, not `http://localhost:8000`. Uvicorn
+binds IPv4 only, and `localhost` resolving to `::1` first adds a ~2000 ms
+connect stall per request on Windows — enough to swamp any real measurement.
+`POST /jobs` is ~18 ms; the same call via `localhost` "measures" ~2070 ms.
 
 ### Error responses
 
