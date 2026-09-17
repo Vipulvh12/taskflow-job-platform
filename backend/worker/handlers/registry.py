@@ -2,6 +2,19 @@ from typing import Callable
 
 HandlerFn = Callable[[dict], dict]
 
+
+class HandlerError(Exception):
+    """Input the handler itself rejected — a missing or malformed field.
+
+    This is the PERMANENT failure signal. Retrying cannot help: the payload
+    is immutable, so the same input would be rejected identically three
+    times, 30 seconds apart. Jobs failing this way go straight to FAILED
+    and never reach the dead-letter queue, which is reserved for jobs that
+    exhausted real retries and might still succeed if re-run.
+
+    Any OTHER exception from a handler is treated as transient and retried.
+    """
+
 _registry: dict[str, HandlerFn] = {}
 
 

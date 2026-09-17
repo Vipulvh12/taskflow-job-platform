@@ -19,12 +19,12 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 7 complete: jobs submitted through the API are published to RabbitMQ,
-consumed by a worker process, dispatched to a real handler, and written back to
-Postgres with a `job_attempts` row.
+Phase 8 complete: jobs submitted through the API are published to RabbitMQ,
+consumed by a worker, dispatched to a handler, retried with exponential backoff
+on transient failure, and dead-lettered once retries run out.
 
-**A failure is terminal right now** — no retry, no backoff, no dead-letter
-queue. Those land in Phase 8.
+Still to come: a second job type (Phase 9), the React frontend (10–11), a test
+suite (12), and Compose-ing the API and worker themselves (13).
 
 ## Running it
 
@@ -76,12 +76,80 @@ handle the API's idle connection suffers. Process restart is the right fix —
 CSV content travels inline in the payload under the existing 64KB cap; real file
 uploads and object storage are still deferred to V2.
 
-### Known gap
+## Retries and dead-lettering
 
-A worker killed mid-job leaves that job at `RUNNING` forever — nothing detects
-an abandoned job until V2 heartbeats. Recover by hand:
-`UPDATE jobs SET status='QUEUED' WHERE id='...'` and republish, or just
-resubmit.
+```
+   (api) ──publish──> [ jobs ] <──consume── (worker)
+                         │  ▲
+      nack(requeue=      │  │  TTL expiry dead-letters back to the
+       False) when       │  │  default exchange, routing key "jobs"
+      retries run out    │  │
+                         ▼  │   ┌──────────────────────────┐
+                   [jobs.dlx]└───┤ jobs.retry.5s   ttl=5s   │
+                         │       │ jobs.retry.25s  ttl=25s  │
+                         ▼       └──────────────────────────┘
+                   [ jobs.dlq ]              ▲
+                                worker publishes here with
+                                routing key retry.<delay>
+```
+
+Backoff is held by the **broker**, not by a sleeping worker: a failed job is
+republished onto a delay queue whose `x-message-ttl` expires it back into the
+main queue. A worker that slept through its own backoff would be occupying a
+process doing nothing.
+
+**One queue per delay tier, not per-message TTL.** RabbitMQ only expires
+messages at the *head* of a queue, so a 5s message queued behind a 25s message
+waits the full 25s. Per-queue TTL means every message in a queue shares a
+deadline and FIFO expiry is correct.
+
+Topology is declared by one shared `declare_topology()`
+([queue_topology.py](backend/app/queue_topology.py)) that the API and the worker
+both call — RabbitMQ requires every declaration of a queue to pass identical
+arguments, so two modules declaring `jobs` independently is a
+`PRECONDITION_FAILED` waiting to happen.
+
+### Failure taxonomy
+
+| Failure | Status | Retried? | Reaches DLQ? |
+|---|---|---|---|
+| `HandlerError` (handler rejected its input) | `FAILED` | no | no |
+| Any other exception | `RETRYING` → … → `DEAD` | yes | yes |
+| No handler registered for the type | `RETRYING` → … → `DEAD` | yes | yes |
+
+A `HandlerError` means the payload is wrong, and the payload is immutable — the
+same input would be rejected identically three times, 30 seconds apart. Those
+fail once and stop. The DLQ is reserved for jobs that might still succeed if
+re-run, which is what makes a manual-retry admin view (V2) meaningful.
+
+A missing handler is deliberately treated as *transient*: it usually means a
+deploy hasn't rolled out yet, and parking the job in the DLQ is exactly what
+lets an admin re-run it once the handler ships.
+
+Tune with `JOB_MAX_ATTEMPTS` (default 3, counting the first try) and
+`JOB_RETRY_DELAYS` (default `5,25`). Adding a tier requires the retry queue for
+it to exist — it's declared from the same setting, so both the API and worker
+must be restarted together.
+
+### Attempt history
+
+`job_attempts` holds one row per try with its own error and timing, so retry
+history is real rather than a counter. Note that the worker *republishes* a new
+message for each retry rather than forwarding the original, so the broker's
+`x-death` headers only describe the last hop — `job_attempts` is the audit
+trail, not the message.
+
+### Known gaps
+
+- A worker killed mid-job leaves that job at `RUNNING` forever — nothing detects
+  an abandoned job until V2 heartbeats. Recover by hand:
+  `UPDATE jobs SET status='QUEUED' WHERE id='...'` and republish, or resubmit.
+- If the worker cannot publish the retry message, it requeues instead of acking.
+  The job gets re-attempted, costing one extra attempt — acceptable under
+  at-least-once, and better than a job stranded at `RETRYING` with no message
+  anywhere.
+- Backoff has no jitter, so a batch of jobs failing together retries in
+  lockstep. Fine at this scale; jitter is the fix when it isn't.
 
 ## Auth
 

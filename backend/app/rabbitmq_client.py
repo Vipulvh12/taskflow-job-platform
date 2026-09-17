@@ -6,10 +6,12 @@ import pika
 from pika.exceptions import AMQPError
 
 from app.config import settings
+from app.queue_topology import QUEUE_JOBS, declare_topology
 
 logger = logging.getLogger("taskflow")
 
-QUEUE_NAME = "jobs"
+# Kept as an alias so existing imports stay valid.
+QUEUE_NAME = QUEUE_JOBS
 
 _lock = threading.Lock()
 _connection: pika.BlockingConnection | None = None
@@ -21,8 +23,9 @@ def _get_channel():
     if _connection is None or _connection.is_closed:
         _connection = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
         _channel = _connection.channel()
-        # idempotent: no-op if the queue already exists with matching args
-        _channel.queue_declare(queue=QUEUE_NAME, durable=True)
+        # idempotent: no-op if everything already exists with matching args.
+        # Shared with the worker so the two can't declare `jobs` differently.
+        declare_topology(_channel, settings.retry_delays)
     return _channel
 
 

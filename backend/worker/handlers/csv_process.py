@@ -1,15 +1,9 @@
 import csv
 import io
 
-from worker.handlers.registry import register
+from worker.handlers.registry import HandlerError, register
 
-
-class HandlerError(Exception):
-    """Input the handler itself rejected (missing/malformed field) —
-    distinct from an unexpected bug, though Phase 7 treats both the same
-    way (mark FAILED). Phase 8 can use this distinction later to decide
-    what's worth retrying (a transient bug might succeed on retry; a
-    malformed payload never will)."""
+__all__ = ["handle", "HandlerError"]
 
 
 @register("csv_process")
