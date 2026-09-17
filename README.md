@@ -19,12 +19,12 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 5b complete: infrastructure, a versioned schema, a unified error envelope,
-authentication, job submission with idempotency, and Redis-backed rate limiting.
+Phase 6 complete: infrastructure, a versioned schema, a unified error envelope,
+authentication, job submission with idempotency, rate limiting, and publishing
+to RabbitMQ on job creation.
 
-**Submitted jobs stay `QUEUED` forever right now** — nothing publishes them to
-RabbitMQ (Phase 6) and no worker consumes them (Phase 7). That is expected at
-this point, not a bug.
+**Messages pile up in the `jobs` queue and nothing drains them** — the worker
+lands in Phase 7. Submitted jobs stay `QUEUED`. That is expected, not a bug.
 
 ## Auth
 
@@ -94,6 +94,42 @@ would never find out. Sending different keys in the body and the
 - Per-type `payload` schemas are deliberately not defined yet — the handler that
   consumes a payload defines its contract, and those land in Phases 7 and 9.
   Today `payload` is validated as "a JSON object under 64KB".
+## Queueing
+
+A committed job is published to the durable `jobs` queue as a persistent
+message carrying **only** `{"job_id": "..."}`. Postgres is the single source of
+truth for job data; the message is a signal that something needs processing, and
+the worker re-reads the row by id. Copying `type`/`payload` into the message
+would let a worker act on data that changed after publish (an admin retry, say).
+
+The broker connection is one shared `pika.BlockingConnection` behind a
+`threading.Lock` — pika connections are not thread-safe and sync routes run
+across FastAPI's threadpool. A connection per publish would add a TCP + AMQP
+handshake to every submission. Under heavy concurrency this lock serializes
+publishes; a pool is the answer if that ever shows up in a load test.
+
+The connection opens on first publish, not at startup, so the API and broker
+have no startup-order dependency (which matters once both are Compose services
+in Phase 13). A publish retries **once** on a fresh connection before failing:
+pika only notices a broker that went away when it next touches the socket, so
+`is_closed` still reads `False` and the cached channel is quietly dead. Without
+the retry, the first job submitted after any broker restart is sacrificed to
+discovering that.
+
+### Dual-write limitation
+
+The job row and the queue message live in two systems with no shared
+transaction. If the commit succeeds but the publish fails, the job is marked
+`FAILED` and the client gets a `502` — visibly broken beats a job sitting at
+`QUEUED` forever with nothing to process it. Such a row is distinguishable from
+a genuine processing failure by `attempt_count = 0`. The real fix is a
+transactional outbox (write the "needs publishing" fact in the job's own
+transaction, let a relay publish it with retries); that's V2/V3.
+
+Note also that `basic_publish` here is fire-and-forget — there are no publisher
+confirms, so a message the broker drops after accepting the TCP write would go
+unnoticed. Confirms are the hardening step that closes that gap.
+
 ## Rate limiting
 
 | Endpoint | Limit | Keyed by |

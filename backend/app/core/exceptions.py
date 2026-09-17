@@ -49,3 +49,8 @@ class UnauthorizedError(AppError):
 class ForbiddenError(AppError):
     status_code = 403
     code = "forbidden"
+
+
+class QueuePublishError(AppError):
+    status_code = 502
+    code = "queue_unavailable"

@@ -1,13 +1,15 @@
 import uuid
 from typing import Any
 
+from pika.exceptions import AMQPError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.enums import JobStatus, JobType
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, QueuePublishError
 from app.models.job import Job
 from app.models.user import User
+from app.rabbitmq_client import publish_job
 from app.redis_client import redis_client
 
 IDEMPOTENCY_KEY_PREFIX = "idempotency:"
@@ -34,6 +36,29 @@ def _assert_same_request(
         raise ConflictError(
             "This idempotency key was already used for a different request. "
             "Use a new key, or resend the original request unchanged."
+        )
+
+
+def _publish_or_mark_failed(db: Session, job: Job) -> None:
+    """Called exactly once, right after a BRAND-NEW job row is committed —
+    never on the idempotency-replay path (Phase 5's 200 response), since
+    that job was already published, or already failed, the first time it
+    was created.
+
+    The row and the message live in two systems with no shared transaction.
+    If the commit lands but the publish doesn't, the alternative to this is
+    a job stuck at QUEUED forever with nothing to process it — a silent
+    failure. Marking it FAILED and returning 502 is worse for the client
+    but visible, which is the trade worth making. A transactional outbox
+    is the real fix (V2/V3)."""
+    try:
+        publish_job(str(job.id))
+    except AMQPError:
+        job.status = JobStatus.FAILED.value
+        db.commit()
+        raise QueuePublishError(
+            "Job was created but could not be queued for processing. "
+            "It has been marked FAILED — please retry with a new request."
         )
 
 
@@ -91,6 +116,10 @@ def create_job(
         return existing, False
 
     db.refresh(job)
+    # Publish before caching the idempotency key: if the publish fails this
+    # raises, and there's no point caching a pointer to a job that was never
+    # queued. The DB row (and its unique constraint) still holds the key.
+    _publish_or_mark_failed(db, job)
     if idempotency_key:
         _cache_idempotency(user.id, idempotency_key, job.id)
     return job, True
