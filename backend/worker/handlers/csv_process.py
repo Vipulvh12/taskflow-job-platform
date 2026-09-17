@@ -1,13 +1,13 @@
 import csv
 import io
 
-from worker.handlers.registry import HandlerError, register
+from worker.handlers.registry import HandlerError, JobContext, register
 
 __all__ = ["handle", "HandlerError"]
 
 
 @register("csv_process")
-def handle(payload: dict) -> dict:
+def handle(payload: dict, context: JobContext) -> dict:
     csv_text = payload.get("csv_text")
     if not csv_text or not isinstance(csv_text, str):
         raise HandlerError("payload.csv_text is required and must be a string.")

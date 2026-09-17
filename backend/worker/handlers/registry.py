@@ -1,6 +1,21 @@
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
-HandlerFn = Callable[[dict], dict]
+
+@dataclass(frozen=True)
+class JobContext:
+    """Everything a handler may need about the run itself, as opposed to its
+    input. Passed explicitly rather than reached for via imports so handlers
+    stay callable from a test without a live database or settings object."""
+
+    job_id: uuid.UUID
+    attempt_number: int
+    storage_dir: Path
+
+
+HandlerFn = Callable[[dict, JobContext], dict]
 
 
 class HandlerError(Exception):
@@ -33,3 +48,7 @@ def register(job_type: str):
 
 def get_handler(job_type: str) -> HandlerFn | None:
     return _registry.get(job_type)
+
+
+def registered_types() -> list[str]:
+    return sorted(_registry)

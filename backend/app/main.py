@@ -46,7 +46,12 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         # non-string element (list indices) so what's left reads as a field path.
         parts = [p for p in first["loc"] if isinstance(p, str) and p not in _LOC_SECTIONS]
         field = ".".join(parts)
-        message = f"{field}: {first['msg']}" if field else first["msg"]
+        # Pydantic prefixes any ValueError raised inside a custom validator with
+        # "Value error, ". That's an internal detail; clients get the message.
+        msg = first["msg"]
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, "):]
+        message = f"{field}: {msg}" if field else msg
     return JSONResponse(
         status_code=422,
         content={"error": {"code": "validation_error", "message": message}},

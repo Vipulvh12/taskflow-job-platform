@@ -2,6 +2,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 # backend/app/config.py -> parents[2] is the repo root (taskflow/), where .env lives
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
@@ -27,6 +28,11 @@ class Settings(BaseSettings):
     # Comma-separated rather than a list, because reading a list from an
     # env var means JSON-encoding it there. Exponential: 5s, then 25s.
     job_retry_delays: str = "5,25"
+
+    # Where handlers write generated artifacts. Local disk for MVP; in Phase 13
+    # this becomes a volume shared by the api and worker containers, and in V2
+    # it is replaced by object storage (MinIO / S3).
+    storage_dir: Path = ROOT_DIR / "storage"
 
     @property
     def retry_delays(self) -> list[int]:

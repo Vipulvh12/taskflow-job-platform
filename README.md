@@ -19,12 +19,12 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 8 complete: jobs submitted through the API are published to RabbitMQ,
-consumed by a worker, dispatched to a handler, retried with exponential backoff
-on transient failure, and dead-lettered once retries run out.
+Phase 9 complete: the backend MVP works end to end for two real job types —
+submit over HTTP, queue, execute, retry with backoff, dead-letter, read results
+back.
 
-Still to come: a second job type (Phase 9), the React frontend (10–11), a test
-suite (12), and Compose-ing the API and worker themselves (13).
+Still to come: the React frontend (10–11), a test suite (12), and Compose-ing
+the API and worker themselves (13).
 
 ## Running it
 
@@ -66,15 +66,46 @@ No auto-reconnect: a consuming connection notices a dead broker immediately
 handle the API's idle connection suffers. Process restart is the right fix —
 `restart: unless-stopped` in Phase 13.
 
-### Handlers
+### Job types
 
 | Type | Payload | Result |
 |---|---|---|
-| `csv_process` | `{"csv_text": "<inline CSV>"}` | `row_count`, `column_count`, and per-column stats (`min`/`max`/`mean` for fully numeric columns, `non_null_count` otherwise) |
-| `pdf_generate` | — | Accepted by the API, **no handler yet** → fails at the worker. Phase 9. |
+| `csv_process` | `csv_text` | `row_count`, `column_count`, per-column stats (`min`/`max`/`mean` for fully numeric columns, `non_null_count` otherwise) |
+| `pdf_generate` | `title`, `body`, `author?` | `file_name`, `size_bytes`, `page_count`, `paragraph_count`, `title` |
 
-CSV content travels inline in the payload under the existing 64KB cap; real file
-uploads and object storage are still deferred to V2.
+Payloads travel inline under the existing 64KB cap. `pdf_generate` writes a real
+PDF (reportlab) to `storage_dir/<job_id>.pdf` — named by job id so a retry
+overwrites its own previous output instead of orphaning files. The result stores
+the **file name**, not an absolute path, because that path differs between the
+host and a container. Real file *uploads* and object storage stay deferred to V2.
+
+### Adding a job type
+
+Three edits, none of them to the dispatch machinery:
+
+1. a member in `JobType` ([core/enums.py](backend/app/core/enums.py))
+2. a payload model in [job_types.py](backend/app/job_types.py), registered in
+   `JOB_PAYLOAD_SCHEMAS`
+3. a handler module in `worker/handlers/` decorated with `@register("...")`
+
+Handlers are **auto-discovered** — `load_handlers()` imports every module in the
+package, so there is no import list to forget. A handler receives
+`(payload, JobContext)`, where the context carries `job_id`, `attempt_number`
+and `storage_dir`; handlers never reach for settings directly, which keeps them
+callable from a test without a database.
+
+The worker logs its registered handlers at startup and warns about any job type
+the API accepts that it cannot run — a partial rollout should be visible
+immediately, not one dead-lettered job at a time.
+
+### Payload validation happens twice, on purpose
+
+The API validates `payload` against the type's schema at submission (`422`, with
+`extra="forbid"` so a typo'd key is rejected rather than silently dropped), and
+the handler re-checks its own inputs. The second check is not redundant: a row
+can be edited directly in the database, and a replayed message may predate a
+schema change. Verified by inserting a malformed row straight into Postgres and
+publishing for it — the handler rejects it cleanly as a permanent failure.
 
 ## Retries and dead-lettering
 

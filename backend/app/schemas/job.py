@@ -3,9 +3,10 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.core.enums import JobStatus, JobType
+from app.job_types import JOB_PAYLOAD_SCHEMAS
 
 MAX_PAYLOAD_BYTES = 64 * 1024
 
@@ -32,6 +33,26 @@ class JobCreateRequest(BaseModel):
         if size > MAX_PAYLOAD_BYTES:
             raise ValueError(f"Payload must be at most {MAX_PAYLOAD_BYTES} bytes (got {size}).")
         return v
+
+    @model_validator(mode="after")
+    def payload_matches_type(self):
+        """Validate the payload against the schema for this job type, so a
+        malformed payload is a 422 at submission rather than a job that gets
+        queued, dispatched, and only then discovered to be unrunnable.
+
+        The raw payload dict is kept as-is (not replaced with the validated
+        model's dump) so what lands in JSONB is exactly what the client sent."""
+        schema = JOB_PAYLOAD_SCHEMAS.get(self.type)
+        if schema is None:
+            return self
+        try:
+            schema.model_validate(self.payload)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            field = ".".join(str(p) for p in first["loc"])
+            location = f"payload.{field}" if field else "payload"
+            raise ValueError(f"{location}: {first['msg']}") from None
+        return self
 
 
 class JobCreateResponse(BaseModel):

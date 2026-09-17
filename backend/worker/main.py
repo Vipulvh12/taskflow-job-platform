@@ -17,8 +17,9 @@ from app.queue_topology import (
     declare_topology,
     retry_routing_key,
 )
-from worker.handlers import csv_process  # noqa: F401 — import registers the handler
-from worker.handlers.registry import HandlerError, get_handler
+from app.job_types import JOB_PAYLOAD_SCHEMAS
+from worker.handlers import load_handlers
+from worker.handlers.registry import HandlerError, JobContext, get_handler, registered_types
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow.worker")
@@ -66,8 +67,13 @@ def process_job(job_id: str) -> tuple[Disposition, int | None]:
                          f"No handler registered for job type '{job.type}'.",
                          permanent=False)
 
+        context = JobContext(
+            job_id=job.id,
+            attempt_number=attempt_number,
+            storage_dir=settings.storage_dir,
+        )
         try:
-            result = handler(job.payload)
+            result = handler(job.payload, context)
         except HandlerError as exc:
             # The handler rejected its own input. The payload can't change,
             # so a retry would fail identically — terminal immediately.
@@ -182,7 +188,23 @@ def on_message(channel, method, properties, body):
     channel.basic_ack(delivery_tag=method.delivery_tag)
 
 
+def _log_handler_coverage() -> None:
+    """A job type the API accepts but this worker can't run is a real
+    operational condition (a partial rollout), and it should be visible at
+    startup rather than discovered one failed job at a time."""
+    available = set(registered_types())
+    logger.info("Registered handlers: %s", ", ".join(sorted(available)) or "(none)")
+    missing = sorted({t.value for t in JOB_PAYLOAD_SCHEMAS} - available)
+    if missing:
+        logger.warning(
+            "No handler for job type(s): %s — jobs of these types will retry, "
+            "then dead-letter.", ", ".join(missing),
+        )
+
+
 def main():
+    load_handlers()
+    _log_handler_coverage()
     connection = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
     channel = connection.channel()
     declare_topology(channel, settings.retry_delays)
