@@ -1,26 +1,39 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { JobDetail } from "./pages/JobDetail";
+import { JobList } from "./pages/JobList";
 import { Login } from "./pages/Login";
 import { Register } from "./pages/Register";
+import { SubmitJob } from "./pages/SubmitJob";
 
-function JobsPlaceholder() {
-  // Phase 11 replaces this with the real job list.
+function Shell({ children }) {
   const { user, logout } = useAuth();
   return (
-    <main className="auth-page">
-      <div className="card">
-        <h1>Signed in</h1>
-        <p>
+    <div className="shell">
+      <nav className="topbar">
+        <Link to="/jobs" className="brand">
+          TaskFlow
+        </Link>
+        <span className="spacer" />
+        <span className="muted">
           {user.email}
           {user.is_admin ? " (admin)" : ""}
-        </p>
-        <p className="muted">The job list arrives in Phase 11.</p>
-        <button type="button" onClick={logout}>
+        </span>
+        <button type="button" className="secondary" onClick={logout}>
           Log out
         </button>
-      </div>
-    </main>
+      </nav>
+      <main className="content">{children}</main>
+    </div>
+  );
+}
+
+function Protected({ children }) {
+  return (
+    <ProtectedRoute>
+      <Shell>{children}</Shell>
+    </ProtectedRoute>
   );
 }
 
@@ -31,12 +44,31 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          {/* /jobs/new is a static segment, so react-router ranks it above
+              /jobs/:id regardless of declaration order — listed first anyway
+              so the intent is obvious to a reader. */}
+          <Route
+            path="/jobs/new"
+            element={
+              <Protected>
+                <SubmitJob />
+              </Protected>
+            }
+          />
+          <Route
+            path="/jobs/:id"
+            element={
+              <Protected>
+                <JobDetail />
+              </Protected>
+            }
+          />
           <Route
             path="/jobs"
             element={
-              <ProtectedRoute>
-                <JobsPlaceholder />
-              </ProtectedRoute>
+              <Protected>
+                <JobList />
+              </Protected>
             }
           />
           <Route path="*" element={<Navigate to="/jobs" replace />} />

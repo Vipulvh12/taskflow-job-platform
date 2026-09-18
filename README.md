@@ -19,11 +19,12 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 10 complete: the backend MVP works end to end for two real job types, and
-a React frontend authenticates against it.
+Phase 11 complete: the MVP works end to end from the browser — register, submit
+a job, watch it queue, run, retry and settle, and read its result and full
+attempt history.
 
-Still to come: the frontend job flow (11), a test suite (12), and Compose-ing
-the API and worker themselves (13).
+Still to come: a test suite (12), Compose-ing the API and worker themselves
+(13), and the indexing benchmark (14).
 
 ## Running it
 
@@ -503,3 +504,35 @@ The API allows `CORS_ORIGINS_RAW` (default `http://localhost:5173` and the
 and tokens travel in the `Authorization` header. If Vite picks a different port
 because 5173 is taken, set `CORS_ORIGINS_RAW` to match; a mismatch surfaces only
 as an opaque browser CORS error with nothing in the server log.
+
+### Job pages
+
+| Route | Purpose |
+|---|---|
+| `/jobs` | The caller's jobs, newest first, paginated |
+| `/jobs/new` | Submit form; the type dropdown drives which payload fields render |
+| `/jobs/:id` | Full record — payload, result, and one row per attempt |
+
+**Polling, not WebSockets.** Jobs finish in seconds, so a persistent connection
+would buy imperceptible latency in exchange for reconnect handling and
+auth-over-a-socket. Both pages poll every 2s.
+
+Polling is **derived state, not a one-way stop**: it runs exactly while
+something on the page is non-terminal (`hasActiveJobs` in
+[job-status.js](frontend/src/job-status.js)). A finished page stops hitting the
+API, and polling resumes by itself when a newly submitted job appears — a
+`clearInterval` that never restarts would leave a stale page silent forever.
+
+`FAILED` counts as terminal for polling even though the job never ran: it means
+the queue publish failed at submission, so nothing will ever move it.
+
+### The duplicated contract
+
+[job-types.js](frontend/src/job-types.js) mirrors the payload models in
+`backend/app/job_types.py` by hand. That is deliberate duplication — the
+alternative is a `GET /job-types` endpoint the spec never asked for — and the
+cost is that a backend schema change needs a matching edit there.
+
+It fails loudly rather than subtly: the backend's payload models use
+`extra="forbid"`, so a drifted field name is a `422` naming the offending key,
+not a silently dropped value.
