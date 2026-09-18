@@ -19,12 +19,11 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 11 complete: the MVP works end to end from the browser — register, submit
-a job, watch it queue, run, retry and settle, and read its result and full
-attempt history.
+Phase 12 complete: the MVP works end to end from the browser, and a pytest suite
+covers it against real Postgres, Redis and RabbitMQ.
 
-Still to come: a test suite (12), Compose-ing the API and worker themselves
-(13), and the indexing benchmark (14).
+Still to come: Compose-ing the API and worker themselves (13), and the indexing
+benchmark (14).
 
 ## Running it
 
@@ -536,3 +535,56 @@ cost is that a backend schema change needs a matching edit there.
 It fails loudly rather than subtly: the backend's payload models use
 `extra="forbid"`, so a drifted field name is a `422` naming the offending key,
 not a silently dropped value.
+
+## Tests
+
+```bash
+cd backend
+docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "CREATE DATABASE taskflow_test;"  # once
+pytest -q
+```
+
+59 tests, ~60s, against **real** infrastructure rather than mocks. That is a
+deliberate choice: the two hardest bugs in this project so far — the idempotency
+race and the stale broker connection — both lived precisely in behaviour a mock
+would have faked away.
+
+### Isolation
+
+`.env.test` (loaded by `pytest-dotenv`, so `config.py` is untouched) points the
+suite at a separate database `taskflow_test`, Redis **db index 1** rather than
+0, and a throwaway `jobs.test` queue. An autouse fixture truncates, flushes and
+purges before *every* test, so there are no ordering dependencies — verified by
+running the suite twice back to back with no cleanup in between.
+
+`conftest.py` refuses to start at all unless it is pointed at `taskflow_test`
+and Redis db 1. The cleanup fixture runs `TRUNCATE`, so a missing `.env.test`
+would otherwise silently destroy the dev database.
+
+Tests never touch the real `jobs` queue. Its declaration carries Phase 8's
+dead-letter arguments, and RabbitMQ rejects any declare whose arguments differ —
+so one careless `queue_declare` in a test would take the queue down for
+everything. `publish_job` takes a `queue_name` for that reason.
+
+### What is covered
+
+| Area | Notable cases |
+|---|---|
+| Security (unit) | hash/verify round-trip, per-call salting, expired token, token forged with another secret |
+| Handlers (unit) | real CSV stats, real PDF bytes on disk, permanent-failure signalling, retry overwriting its own output |
+| Auth | rotation, replay-after-rotation, revocation, token type confusion, account enumeration, the 72-**byte** password limit |
+| Idempotency | replay, header form, conflicting keys, different body → 409, per-user scoping, **8-thread race**, and survival of an empty cache |
+| Rate limiting | exact 100/1 and 10/1 splits, `Retry-After`, TTL always set, per-user isolation, limiter running *before* the credential check |
+| Worker lifecycle | success, permanent vs transient failure, both backoff tiers, exhaustion → `DEAD`, attempt history, duplicate-delivery skip, missing row |
+
+The worker tests call `process_job` directly against the test database rather
+than running a live consumer: a real one would make the suite wait out 5s + 25s
+of backoff per dead job and assert on wall-clock gaps. `process_job` returns a
+`Disposition` describing what should happen to the *message*, which is the seam
+that makes this possible with no channel and no mock of one.
+
+The 8-thread race deliberately does **not** override the app's DB dependency.
+Sharing one session between test and handler would make the race meaningless —
+SQLAlchemy sessions are not thread-safe, so eight threads through one session is
+a crash, not a race. Letting each request open its own session is what puts
+eight real connections in contention on the unique constraint.

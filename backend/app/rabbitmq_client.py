@@ -29,11 +29,16 @@ def _get_channel():
     return _channel
 
 
-def publish_job(job_id: str) -> None:
+def publish_job(job_id: str, queue_name: str = QUEUE_JOBS) -> None:
     """Publishes a minimal trigger message — just the job_id. Postgres,
     not the queue, is the source of truth for job data; the worker
     (Phase 7) re-fetches the full row by id rather than trusting
     anything carried in the message.
+
+    `queue_name` exists so tests can redirect publishing to a throwaway queue.
+    They must never publish to the real `jobs` queue: its declaration carries
+    Phase 8's dead-letter arguments, and any declare with different arguments
+    is a PRECONDITION_FAILED that takes the queue down for everyone.
 
     Raises pika.exceptions.AMQPError on any connection/publish failure —
     callers must handle this explicitly; it is not swallowed here."""
@@ -56,7 +61,7 @@ def publish_job(job_id: str) -> None:
                 channel = _get_channel()
                 channel.basic_publish(
                     exchange="",
-                    routing_key=QUEUE_NAME,
+                    routing_key=queue_name,
                     body=message,
                     properties=properties,
                 )

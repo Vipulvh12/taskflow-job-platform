@@ -5,38 +5,58 @@ import { StatusBadge } from "../components/StatusBadge";
 import { hasActiveJobs } from "../job-status";
 import { JOB_TYPES } from "../job-types";
 
-const POLL_INTERVAL_MS = 2000;
+const ACTIVE_POLL_MS = 2000;
+const IDLE_POLL_MS = 15000; // still checking, just not hammering, while quiet
+const PAGE_SIZE = 20;
 
 export function JobList() {
   const [page, setPage] = useState(1);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
-  const fetchJobs = useCallback(async () => {
+  useEffect(() => {
+    let cancelled = false;
+    let timeoutId = null;
+
+    // A self-scheduling tick, not setInterval. The cadence is recomputed from
+    // each response, which is what makes polling *resumable*: an idle list
+    // still checks every 15s, so a job submitted in another tab shows up
+    // without a reload. Stopping outright once everything settled would leave
+    // the page silent forever.
+    async function tick() {
+      let nextDelay = IDLE_POLL_MS;
+      try {
+        const fresh = await listJobs({ page, pageSize: PAGE_SIZE });
+        if (cancelled) return;
+        setData(fresh);
+        setError(null);
+        nextDelay = hasActiveJobs(fresh.items) ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+      } catch {
+        if (!cancelled) setError("Could not load jobs.");
+      } finally {
+        // Guarded: a cancelled effect must not queue another tick.
+        if (!cancelled) timeoutId = setTimeout(tick, nextDelay);
+      }
+    }
+
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [page]);
+
+  const refreshNow = useCallback(async () => {
     try {
-      setData(await listJobs({ page, pageSize: 20 }));
+      setData(await listJobs({ page, pageSize: PAGE_SIZE }));
       setError(null);
     } catch {
       setError("Could not load jobs.");
     }
   }, [page]);
 
-  useEffect(() => {
-    fetchJobs();
-  }, [fetchJobs]);
-
   const jobs = data?.items ?? [];
-  const polling = hasActiveJobs(jobs);
-
-  useEffect(() => {
-    // Polling runs exactly while something on this page is still moving. A
-    // finished page must not hit the API every 2s forever — and because this
-    // is derived state rather than a one-way stop, polling resumes by itself
-    // when a newly submitted job appears.
-    if (!polling) return undefined;
-    const id = setInterval(fetchJobs, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [polling, fetchJobs]);
+  const active = hasActiveJobs(jobs);
 
   return (
     <section>
@@ -56,15 +76,11 @@ export function JobList() {
       <p className="muted">
         {data ? `${data.total} job${data.total === 1 ? "" : "s"}` : "Loading…"}
         {" · "}
-        {polling ? "auto-refreshing every 2s" : "idle — nothing in progress"}
-        {!polling && (
-          <>
-            {" · "}
-            <button type="button" className="linkish" onClick={fetchJobs}>
-              Refresh
-            </button>
-          </>
-        )}
+        {active ? "refreshing every 2s" : "idle — checking every 15s"}
+        {" · "}
+        <button type="button" className="linkish" onClick={refreshNow}>
+          Refresh now
+        </button>
       </p>
 
       {data && jobs.length === 0 && <p>No jobs yet.</p>}
