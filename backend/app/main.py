@@ -2,9 +2,11 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.config import settings
 from app.core.exceptions import AppError, RateLimitError
 from app.routers import auth, health, jobs
 
@@ -15,6 +17,19 @@ logger = logging.getLogger("taskflow")
 _LOC_SECTIONS = {"body", "query", "path", "header", "cookie"}
 
 app = FastAPI(title="TaskFlow API")
+
+# The Vite dev server is a different origin (port 5173) from this API (8000),
+# so without this every browser request fails preflight before reaching a route.
+# No allow_credentials: that flag is for cookie-based auth, and tokens travel in
+# the Authorization header (Phase 4), so there are no credentialed requests to
+# permit. Origins are listed explicitly — "*" plus credentials is rejected by
+# browsers anyway, and a wildcard here would be a needless invitation.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(health.router)
 app.include_router(auth.router)

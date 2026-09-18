@@ -34,15 +34,28 @@ class Settings(BaseSettings):
     # it is replaced by object storage (MinIO / S3).
     storage_dir: Path = ROOT_DIR / "storage"
 
+    # Browser origins allowed to call this API. Configurable because Vite picks
+    # the next free port if 5173 is taken, and a mismatch here fails as an
+    # opaque browser-side CORS error with nothing useful in the server log.
+    cors_origins_raw: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
+
     @property
     def retry_delays(self) -> list[int]:
         return [int(part) for part in self.job_retry_delays.split(",") if part.strip()]
 
+    def tier_for_attempt(self, attempt_number: int) -> int:
+        """Which retry tier schedules the attempt following `attempt_number`.
+        Clamps to the last tier if max_attempts exceeds the configured delays."""
+        return min(attempt_number, len(self.retry_delays))
+
     def delay_for_attempt(self, attempt_number: int) -> int:
-        """Delay before the attempt that follows `attempt_number`. Clamps to
-        the last configured tier if more retries than tiers are configured."""
-        delays = self.retry_delays
-        return delays[min(attempt_number, len(delays)) - 1]
+        """The wait that tier will impose. Used for logging — the authoritative
+        delay is the queue's x-message-ttl, set at declaration."""
+        return self.retry_delays[self.tier_for_attempt(attempt_number) - 1]
 
 
 settings = Settings()

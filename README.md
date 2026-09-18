@@ -19,11 +19,10 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 9 complete: the backend MVP works end to end for two real job types —
-submit over HTTP, queue, execute, retry with backoff, dead-letter, read results
-back.
+Phase 10 complete: the backend MVP works end to end for two real job types, and
+a React frontend authenticates against it.
 
-Still to come: the React frontend (10–11), a test suite (12), and Compose-ing
+Still to come: the frontend job flow (11), a test suite (12), and Compose-ing
 the API and worker themselves (13).
 
 ## Running it
@@ -33,13 +32,20 @@ worker.
 
 ```bash
 docker compose up -d                          # postgres, redis, rabbitmq
-cd backend && uvicorn app.main:app --reload --port 8000    # terminal 1
-cd backend && python -m worker.main                         # terminal 2
+cd backend   && uvicorn app.main:app --reload --port 8000   # terminal 1
+cd backend   && python -m worker.main                       # terminal 2
+cd frontend  && npm run dev                                 # terminal 3
 ```
 
 The worker must run as a module (`python -m worker.main`, from `backend/`), not
 as a script — that's what puts `backend/` on `sys.path` so both `app` and
 `worker` resolve.
+
+RabbitMQ can take ~50s after `docker compose up` before it accepts AMQP
+connections. `rabbitmq-diagnostics ping` returns success earlier than that — it
+checks the Erlang node, not the AMQP listener — so a worker started too early
+dies with `StreamLostError` or `IncompatibleProtocolError`. Wait for a real
+connection, not for `ping`.
 
 ## The worker
 
@@ -116,12 +122,12 @@ publishing for it — the handler rejects it cleanly as a permanent failure.
        False) when       │  │  default exchange, routing key "jobs"
       retries run out    │  │
                          ▼  │   ┌──────────────────────────┐
-                   [jobs.dlx]└───┤ jobs.retry.5s   ttl=5s   │
-                         │       │ jobs.retry.25s  ttl=25s  │
+                   [jobs.dlx]└───┤ jobs.retry.1    ttl=5s   │
+                         │       │ jobs.retry.2    ttl=25s  │
                          ▼       └──────────────────────────┘
                    [ jobs.dlq ]              ▲
                                 worker publishes here with
-                                routing key retry.<delay>
+                                routing key retry.<tier>
 ```
 
 Backoff is held by the **broker**, not by a sleeping worker: a failed job is
@@ -129,7 +135,7 @@ republished onto a delay queue whose `x-message-ttl` expires it back into the
 main queue. A worker that slept through its own backoff would be occupying a
 process doing nothing.
 
-**One queue per delay tier, not per-message TTL.** RabbitMQ only expires
+**One queue per tier, not per-message TTL.** RabbitMQ only expires
 messages at the *head* of a queue, so a 5s message queued behind a 25s message
 waits the full 25s. Per-queue TTL means every message in a queue shares a
 deadline and FIFO expiry is correct.
@@ -139,6 +145,11 @@ Topology is declared by one shared `declare_topology()`
 both call — RabbitMQ requires every declaration of a queue to pass identical
 arguments, so two modules declaring `jobs` independently is a
 `PRECONDITION_FAILED` waiting to happen.
+
+Note that `jobs`'s arguments are now part of its permanent identity: queue
+arguments are immutable, so any future edit to that declaration makes it
+inequivalent to the live queue and every declare fails until the queue is
+deleted — discarding whatever it holds.
 
 ### Failure taxonomy
 
@@ -167,9 +178,18 @@ attempt-level (`SUCCESS`/`FAILED`) and records what happened on that try, while
 attempt rows all read `FAILED`.
 
 Tune with `JOB_MAX_ATTEMPTS` (default 3, counting the first try) and
-`JOB_RETRY_DELAYS` (default `5,25`). Adding a tier requires the retry queue for
-it to exist — it's declared from the same setting, so both the API and worker
-must be restarted together.
+`JOB_RETRY_DELAYS` (default `5,25`). Retry queues are named by **tier**
+(`jobs.retry.1`, `jobs.retry.2`), not by delay, because the delay is
+configurable and a queue called `jobs.retry.5s` would start lying the moment
+that setting changed.
+
+Changing `JOB_RETRY_DELAYS` does **not** retune an existing queue —
+`x-message-ttl` is immutable after declaration. Delete the `jobs.retry.*`
+queues and let them be redeclared, or the new setting is silently ignored.
+
+With the defaults, a job that exhausts its retries takes **~31s** to reach
+`DEAD` (5s + 25s of backoff). That's the expected duration of a failing
+round-trip, not a hang.
 
 ### Attempt history
 
@@ -441,3 +461,45 @@ taskflow/
 ├── .env.example
 └── README.md
 ```
+
+## Frontend
+
+React 19 + Vite, talking to the API at `VITE_API_BASE_URL` (default
+`http://localhost:8000`). Routes: `/login`, `/register`, and `/jobs` behind a
+`ProtectedRoute` that redirects to `/login` when there is no user.
+
+### Tokens are held in memory, never in storage
+
+`localStorage` is readable by any script on the page, so one successful XSS
+anywhere — a dependency, a stray `dangerouslySetInnerHTML` — exfiltrates every
+stored token at once. Module-level variables in
+[api/client.js](frontend/src/api/client.js) mean an attacker's script only
+reaches what is in this tab's heap while it runs.
+
+**The cost is real: a hard refresh logs the user out.** Not a bug, an accepted
+MVP trade. The production fix is an `httpOnly` refresh cookie (invisible to JS)
+with CSRF protection — V2/V3, alongside the other deferred auth hardening.
+
+### One `apiFetch`, three jobs
+
+Every protected call needs the same things, so they live in one place rather
+than in each component: attach `Authorization: Bearer …`, turn the API's
+`{"error": {"code", "message"}}` envelope into a typed `ApiError`, and on a
+`401` attempt exactly one silent refresh before giving up.
+
+Auth endpoints are excluded from that retry — refreshing on a failed refresh
+would loop, and retrying a login would re-present the credential that just
+failed.
+
+Concurrent 401s share a **single** in-flight refresh. Without that, two
+simultaneous expired-token calls would each fire a refresh; the first rotates
+the token (Phase 4 rotates on every refresh), so the second presents one the
+server has already revoked and logs the user out for no reason.
+
+### CORS
+
+The API allows `CORS_ORIGINS_RAW` (default `http://localhost:5173` and the
+127.0.0.1 equivalent). No `allow_credentials` — that flag is for cookie auth,
+and tokens travel in the `Authorization` header. If Vite picks a different port
+because 5173 is taken, set `CORS_ORIGINS_RAW` to match; a mismatch surfaces only
+as an opaque browser CORS error with nothing in the server log.

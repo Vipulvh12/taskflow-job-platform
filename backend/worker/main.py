@@ -36,7 +36,7 @@ class Disposition(Enum):
 
 
 def process_job(job_id: str) -> tuple[Disposition, int | None]:
-    """Returns (disposition, retry_delay_seconds)."""
+    """Returns (disposition, retry_tier)."""
     db = SessionLocal()
     try:
         job = db.get(Job, uuid.UUID(job_id))
@@ -123,13 +123,14 @@ def _fail(db, job: Job, attempt_number: int, started_at: datetime,
                      job.id, attempt_number, error)
         return Disposition.DEAD_LETTER, None
 
-    delay = settings.delay_for_attempt(attempt_number)
+    tier = settings.tier_for_attempt(attempt_number)
     job.status = JobStatus.RETRYING.value
     job.completed_at = None  # not finished; only terminal states get this
     db.commit()
-    logger.warning("Job %s failed on attempt %d, retrying in %ds: %s",
-                   job.id, attempt_number, delay, error)
-    return Disposition.RETRY, delay
+    logger.warning("Job %s failed on attempt %d, retrying via tier %d (~%ds): %s",
+                   job.id, attempt_number, tier, settings.delay_for_attempt(attempt_number),
+                   error)
+    return Disposition.RETRY, tier
 
 
 def _record_attempt(db, job: Job, attempt_number: int, started_at: datetime,
@@ -147,13 +148,13 @@ def _record_attempt(db, job: Job, attempt_number: int, started_at: datetime,
     ))
 
 
-def _schedule_retry(channel, job_id: str, delay: int) -> None:
-    """Publish onto the delay queue for `delay`. Its x-message-ttl expires
-    the message, and its dead-letter config routes it back to the main
-    queue — so the broker, not a sleeping worker, holds the backoff."""
+def _schedule_retry(channel, job_id: str, tier: int) -> None:
+    """Publish onto the tier's delay queue. Its x-message-ttl expires the
+    message, and its dead-letter config routes it back to the main queue —
+    so the broker, not a sleeping worker, holds the backoff."""
     channel.basic_publish(
         exchange=EXCHANGE_RETRY,
-        routing_key=retry_routing_key(delay),
+        routing_key=retry_routing_key(tier),
         body=json.dumps({"job_id": job_id}),
         properties=pika.BasicProperties(delivery_mode=2, content_type="application/json"),
     )
@@ -168,11 +169,11 @@ def on_message(channel, method, properties, body):
         channel.basic_ack(delivery_tag=method.delivery_tag)
         return
 
-    disposition, delay = process_job(job_id)
+    disposition, retry_tier = process_job(job_id)
 
     if disposition is Disposition.RETRY:
         try:
-            _schedule_retry(channel, job_id, delay)
+            _schedule_retry(channel, job_id, retry_tier)
         except Exception:
             # Could not schedule the retry. Requeue instead of acking, so
             # the job isn't stranded at RETRYING with no message anywhere.
