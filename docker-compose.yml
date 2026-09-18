@@ -11,17 +11,96 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:3-management
     ports:
       - "5672:5672"   # AMQP protocol port
       - "15672:15672" # management UI (http://localhost:15672, guest/guest)
+    healthcheck:
+      # NOT `ping`. ping reports success as soon as the Erlang node is up, which
+      # happens ~50s before the AMQP listener accepts connections on this
+      # machine — a worker started on that false positive dies immediately with
+      # IncompatibleProtocolError. check_port_connectivity tests the listener.
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      target: api
+    env_file: .env
+    environment:
+      # Must be set explicitly. storage_dir defaults to ROOT_DIR/"storage",
+      # and ROOT_DIR is computed from config.py's location — which resolves to
+      # "/" inside the image, giving "/storage". That is NOT where the volume
+      # is mounted, so the default would write generated files to a path that
+      # disappears on restart.
+      STORAGE_DIR: /app/storage
+    ports:
+      - "8000:8000"
+    volumes:
+      - job_storage:/app/storage
+    depends_on:
+      # `condition: service_healthy`, not bare depends_on — plain depends_on
+      # waits for the container to start, not for the service inside it to be
+      # ready to accept connections.
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    env_file: .env
+    environment:
+      STORAGE_DIR: /app/storage
+    volumes:
+      # Same named volume, same path as the API: the worker writes a PDF here
+      # and the API reads the identical file. Two containers writing to the
+      # same path WITHOUT a shared volume would be two isolated filesystems.
+      - job_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  job_storage:

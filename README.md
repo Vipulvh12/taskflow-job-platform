@@ -19,11 +19,11 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 12 complete: the MVP works end to end from the browser, and a pytest suite
-covers it against real Postgres, Redis and RabbitMQ.
+Phase 13 complete: the whole backend runs as containers. `docker compose up`
+brings up all five services with no `pip install`, `alembic upgrade` or
+`uvicorn` step on the host.
 
-Still to come: Compose-ing the API and worker themselves (13), and the indexing
-benchmark (14).
+Still to come: the indexing benchmark (14).
 
 ## Running it
 
@@ -31,21 +31,42 @@ Three processes: the infrastructure containers, the API, and at least one
 worker.
 
 ```bash
-docker compose up -d                          # postgres, redis, rabbitmq
-cd backend   && uvicorn app.main:app --reload --port 8000   # terminal 1
-cd backend   && python -m worker.main                       # terminal 2
-cd frontend  && npm run dev                                 # terminal 3
+docker compose up --build -d     # postgres, redis, rabbitmq, api, worker
+cd frontend && npm run dev       # the frontend still runs on the host
 ```
 
-The worker must run as a module (`python -m worker.main`, from `backend/`), not
-as a script — that's what puts `backend/` on `sys.path` so both `app` and
-`worker` resolve.
+The API container runs `alembic upgrade head` before starting uvicorn, so the
+schema is current on every boot with nothing to remember. Migrating an
+already-current database is a no-op, not an error.
 
-RabbitMQ can take ~50s after `docker compose up` before it accepts AMQP
-connections. `rabbitmq-diagnostics ping` returns success earlier than that — it
-checks the Erlang node, not the AMQP listener — so a worker started too early
-dies with `StreamLostError` or `IncompatibleProtocolError`. Wait for a real
-connection, not for `ping`.
+### Running the backend on the host instead
+
+`.env` holds the **Docker-network** hostnames (`postgres`, `redis`, `rabbitmq`)
+because that is what a container on the Compose network needs. `.env.host` keeps
+the `localhost` equivalents for running the API or worker directly:
+
+```bash
+cd backend
+cp ../.env.host ../.env            # or point env_file elsewhere
+uvicorn app.main:app --reload --port 8000
+python -m worker.main
+```
+
+`.env.test` stays on `localhost` regardless — pytest runs on the host, not in a
+container.
+
+### Startup ordering
+
+Every datastore has a healthcheck, and `api`/`worker` wait on
+`condition: service_healthy` for all three. Bare `depends_on` only waits for a
+container to *start*, not for the service inside it to accept connections.
+
+RabbitMQ's healthcheck is `check_port_connectivity`, **not** `ping`. `ping`
+reports success as soon as the Erlang node is up — roughly 50 seconds before the
+AMQP listener accepts connections on this machine — and a worker started on that
+false positive dies immediately with `IncompatibleProtocolError`. Observed:
+RabbitMQ was `Up 40 seconds (healthy)` when the worker was `Up 1 second`, so the
+worker really did wait for the listener.
 
 ## The worker
 
@@ -588,3 +609,42 @@ Sharing one session between test and handler would make the race meaningless —
 SQLAlchemy sessions are not thread-safe, so eight threads through one session is
 a crash, not a race. Letting each request open its own session is what puts
 eight real connections in contention on the unique constraint.
+
+## Containers
+
+| Service | Image | Notes |
+|---|---|---|
+| `postgres` | postgres:16 | published on host **5433** (a native Postgres owns 5432 here) |
+| `redis` | redis:7 | db 0 for the app, db 1 for tests |
+| `rabbitmq` | rabbitmq:3-management | UI at :15672 |
+| `api` | built, `target: api` | migrates, then serves on :8000 |
+| `worker` | built, `target: worker` | consumes; scale with `--scale worker=N` |
+
+One Dockerfile with a shared `deps` stage and two thin final stages. The API and
+worker import the same `app` package and need identical dependencies; installing
+them in two separate Dockerfiles would guarantee drift the first time one was
+updated and the other forgotten.
+
+### `STORAGE_DIR` must be set explicitly
+
+`settings.storage_dir` defaults to `ROOT_DIR / "storage"`, and `ROOT_DIR` is
+derived from `config.py`'s own location — which resolves to `/` inside the
+image, giving `/storage`. The volume mounts at `/app/storage`. Left to the
+default, the worker would write generated PDFs to a path outside the volume,
+where they vanish on restart and the API can never see them. Compose sets
+`STORAGE_DIR=/app/storage` on both services.
+
+Verified the volume is genuinely shared: the worker writes a PDF, and the API
+container lists the same filename at the same path with the same byte count —
+and a file written from the API side is readable by the worker.
+
+### `restart: unless-stopped`
+
+On all five services, after a Docker Desktop auto-update once killed every
+container at once with exit 255.
+
+Note this does **not** cover `docker stop` or `docker kill` — Docker skips the
+restart policy for containers stopped manually. It covers a container that dies
+on its own. Demonstrated by stopping RabbitMQ: the worker (which has no
+auto-reconnect by design) crash-looped 12 times, then stabilized by itself once
+the broker returned, and processed the next job normally.
