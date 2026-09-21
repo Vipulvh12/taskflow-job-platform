@@ -6,10 +6,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.body_limit import BodyLimitMiddleware
 from app.concurrency_limit import ConcurrencyLimitMiddleware
 from app.config import settings
 from app.core.exceptions import AppError, RateLimitError
 from app.routers import admin, auth, health, jobs
+from app.schemas.job import MAX_PAYLOAD_BYTES
+
+# Everything in a job submission besides the payload: type, priority, and an
+# idempotency key of up to 255 characters, which escapes to at most ~3 KB.
+BODY_OVERHEAD_BYTES = 4 * 1024
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow")
@@ -25,6 +31,16 @@ app.add_middleware(
     ConcurrencyLimitMiddleware,
     limit=settings.db_pool_size + settings.db_max_overflow,
 )
+
+# Rejects oversized bodies before the app reads them (see the module). Added
+# after the cap, so it sits outside it; CORS, added last, wraps both, so a
+# browser can still read the 413.
+if settings.max_request_body_bytes < MAX_PAYLOAD_BYTES + BODY_OVERHEAD_BYTES:
+    raise RuntimeError(
+        f"MAX_REQUEST_BODY_BYTES={settings.max_request_body_bytes} can't hold a job "
+        f"payload at its {MAX_PAYLOAD_BYTES}-byte cap plus the rest of the request."
+    )
+app.add_middleware(BodyLimitMiddleware, max_body_size=settings.max_request_body_bytes)
 
 # The Vite dev server is a different origin (port 5173) from this API (8000),
 # so without this every browser request fails preflight before reaching a route.

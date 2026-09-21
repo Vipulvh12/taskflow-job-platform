@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
+    # Largest request body the API will read (app/body_limit.py). The largest
+    # legitimate one is a job submission at the 64 KiB payload cap: ~65.9 KB
+    # even pretty-printed with a 255-char idempotency key. 128 KiB is ~2× that.
+    max_request_body_bytes: int = 128 * 1024
+
     # Total tries per job, including the first. 3 = one attempt plus two
     # retries, so job_retry_delays needs (job_max_attempts - 1) entries.
     job_max_attempts: int = 3
