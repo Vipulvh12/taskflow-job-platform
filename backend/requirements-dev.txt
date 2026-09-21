@@ -1,0 +1,4 @@
+# Host-only tooling, kept out of the Docker images (the Dockerfile installs
+# requirements.txt only). Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+locust>=2.20

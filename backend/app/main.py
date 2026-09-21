@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.concurrency_limit import ConcurrencyLimitMiddleware
 from app.config import settings
 from app.core.exceptions import AppError, RateLimitError
 from app.routers import admin, auth, health, jobs
@@ -17,6 +18,13 @@ logger = logging.getLogger("taskflow")
 _LOC_SECTIONS = {"body", "query", "path", "header", "cookie"}
 
 app = FastAPI(title="TaskFlow API")
+
+# At most one in-flight request per pooled DB connection — without it, a burst
+# of requests can deadlock the process for pool_timeout. See the module.
+app.add_middleware(
+    ConcurrencyLimitMiddleware,
+    limit=settings.db_pool_size + settings.db_max_overflow,
+)
 
 # The Vite dev server is a different origin (port 5173) from this API (8000),
 # so without this every browser request fails preflight before reaching a route.

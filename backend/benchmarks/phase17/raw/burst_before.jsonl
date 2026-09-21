@@ -1,0 +1,8 @@
+{"config": "container, pool 15, no cap", "n": 40, "outcomes": {"200": 40}, "p50_ms": 353, "max_ms": 473}
+{"config": "container, pool 15, no cap", "n": 50, "outcomes": {"200": 50}, "p50_ms": 309, "max_ms": 474}
+{"config": "container, pool 15, no cap", "n": 60, "outcomes": {"500": 40, "200": 20}, "p50_ms": 30554, "max_ms": 30650}
+{"config": "container, pool 15, no cap", "n": 100, "outcomes": {"500": 40, "200": 60}, "p50_ms": 32967, "max_ms": 33383, "peak_idle_in_transaction": 15, "full_pool_idle_samples": 63, "samples": 66}
+{"config": "host API, pool 40, no cap", "n": 60, "outcomes": {"200": 60}, "p50_ms": 1176, "max_ms": 1277, "peak_idle_in_transaction": 34}
+{"config": "host API, pool 40, no cap", "n": 100, "outcomes": {"200": 60, "500": 40}, "p50_ms": 32167, "max_ms": 32234, "peak_idle_in_transaction": 40}
+{"config": "host API, pool 15, with cap", "n": 100, "outcomes": {"200": 100}, "p50_ms": 621, "max_ms": 854, "peak_idle_in_transaction": 12}
+{"config": "host API, pool 15, with cap", "n": 200, "outcomes": {"200": 200}, "p50_ms": 1154, "max_ms": 1951, "peak_idle_in_transaction": 15}

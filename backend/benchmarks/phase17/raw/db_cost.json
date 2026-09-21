@@ -1,0 +1,19 @@
+{
+  "user": "bench-07@taskflow.local",
+  "runs": 5,
+  "queries": {
+    "user lookup (get_current_user)": {
+      "execution_ms": 0.043,
+      "scan": "Seq Scan"
+    },
+    "COUNT(*) for the page total": {
+      "execution_ms": 2.236,
+      "scan": "Index Only Scan [uq_jobs_user_idempotency_key]"
+    },
+    "page of 20 (Phase 14b index)": {
+      "execution_ms": 0.061,
+      "scan": "Index Scan [idx_jobs_user_created]"
+    }
+  },
+  "user_rows": 10061
+}

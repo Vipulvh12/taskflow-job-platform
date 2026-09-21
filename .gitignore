@@ -7,3 +7,7 @@ node_modules/
 storage/
 dist/
 .env.host
+
+# Locust HTML reports: ~1 MB each, almost all bundled JS. The CSVs beside
+# them hold the same data, and render_loadtest.py charts it.
+backend/benchmarks/phase17/raw/*_report.html

@@ -1,0 +1,45 @@
+status codes (server side): {'200': 13155, '201': 708}
+non-access-log lines: 42
+
+ERROR:pika.adapters.utils.io_services_utils:_AsyncBaseTransport._produce() failed, aborting connection: error=ConnectionResetError(104, 'Connection reset by peer'); sock=<socket.socket fd=33, family=2, type=1, proto=6, laddr=('172.22.0.7', 42112)>; Caller's stack:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 1177, in _on_socket_writable
+    self._produce()
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 875, in _produce
+    num_bytes_sent = self._sigint_safe_send(self._sock,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 84, in retry_sigint_wrap
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 917, in _sigint_safe_send
+    return sock.send(data)
+           ^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 1177, in _on_socket_writable
+    self._produce()
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 875, in _produce
+    num_bytes_sent = self._sigint_safe_send(self._sock,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 84, in retry_sigint_wrap
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/pika/adapters/utils/io_services_utils.py", line 917, in _sigint_safe_send
+    return sock.send(data)
+           ^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+INFO:pika.adapters.utils.io_services_utils:_AsyncTransportBase._initate_abort(): Initiating abrupt asynchronous transport shutdown: state=1; error=ConnectionResetError(104, 'Connection reset by peer'); <socket.socket fd=33, family=2, type=1, proto=6, laddr=('172.22.0.7', 42112)>
+INFO:pika.adapters.utils.io_services_utils:Deactivating transport: state=1; <socket.socket fd=33, family=2, type=1, proto=6, laddr=('172.22.0.7', 42112)>
+ERROR:pika.adapters.base_connection:connection_lost: StreamLostError: ("Stream connection lost: ConnectionResetError(104, 'Connection reset by peer')",)
+INFO:pika.connection:AMQP stack terminated, failed to connect, or aborted: opened=True, error-arg=StreamLostError: ("Stream connection lost: ConnectionResetError(104, 'Connection reset by peer')",); pending-error=None
+INFO:pika.connection:Stack terminated due to StreamLostError: ("Stream connection lost: ConnectionResetError(104, 'Connection reset by peer')",)
+INFO:pika.adapters.utils.io_services_utils:Closing transport socket and unlinking: state=2; <socket.socket fd=33, family=2, type=1, proto=6, laddr=('172.22.0.7', 42112)>
+ERROR:pika.adapters.blocking_connection:Unexpected connection close detected: StreamLostError: ("Stream connection lost: ConnectionResetError(104, 'Connection reset by peer')",)
+WARNING:taskflow:RabbitMQ publish failed on a cached connection; reconnecting and retrying once.
+INFO:pika.adapters.utils.connection_workflow:Pika version 1.4.4 connecting to ('172.22.0.2', 5672)
+INFO:pika.adapters.utils.io_services_utils:Socket connected: <socket.socket fd=89, family=2, type=1, proto=6, laddr=('172.22.0.7', 56914), raddr=('172.22.0.2', 5672)>
+INFO:pika.adapters.utils.connection_workflow:Streaming transport linked up: (<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7d50e40f5a90>, _StreamingProtocolShim: <SelectConnection PROTOCOL transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7d50e40f5a90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>).
+INFO:pika.adapters.utils.connection_workflow:AMQPConnector - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7d50e40f5a90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.utils.connection_workflow:AMQPConnectionWorkflow - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7d50e40f5a90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Connection workflow succeeded: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7d50e40f5a90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Created channel=1

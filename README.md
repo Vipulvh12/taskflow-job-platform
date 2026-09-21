@@ -20,9 +20,11 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 ## Status
 
 **MVP complete (Phases 1–14), V2 in progress.** The whole system runs from
-`docker compose up`, is covered by an 89-test suite against real infrastructure,
+`docker compose up`, is covered by a 90-test suite against real infrastructure,
 has benchmarked indexes, recovers automatically from a worker dying mid-job
-(Phase 15), and gives admins a dead-letter view with manual retry (Phase 16).
+(Phase 15), gives admins a dead-letter view with manual retry (Phase 16), and
+has been load tested to 1,000 concurrent users — which found, and fixed, a
+deadlock that froze the API at 100 (Phase 17).
 
 ## Running it
 
@@ -555,6 +557,9 @@ taskflow/
 │   │   └── models/       # User, Job, JobAttempt
 │   ├── alembic/      # migration environment + versions/
 │   ├── worker/       # queue consumer + job handlers
+│   ├── loadtest/     # Locust scenario + server-side sampling (Phase 17)
+│   ├── scripts/      # benchmark seeding and report rendering
+│   ├── benchmarks/   # Phase 14 and 17 results, generated from raw data
 │   └── tests/
 ├── frontend/         # React dashboard
 ├── docker-compose.yml
@@ -644,7 +649,7 @@ docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "CREATE DATABASE
 pytest -q
 ```
 
-59 tests, ~60s, against **real** infrastructure rather than mocks. That is a
+90 tests, ~90s, against **real** infrastructure rather than mocks. That is a
 deliberate choice: the two hardest bugs in this project so far — the idempotency
 race and the stale broker connection — both lived precisely in behaviour a mock
 would have faked away.
@@ -676,6 +681,9 @@ everything. `publish_job` takes a `queue_name` for that reason.
 | Idempotency | replay, header form, conflicting keys, different body → 409, per-user scoping, **8-thread race**, and survival of an empty cache |
 | Rate limiting | exact 100/1 and 10/1 splits, `Retry-After`, TTL always set, per-user isolation, limiter running *before* the credential check |
 | Worker lifecycle | success, permanent vs transient failure, both backoff tiers, exhaustion → `DEAD`, attempt history, duplicate-delivery skip, missing row |
+| Heartbeats & reaper | atomic claim (two deliveries run once), heartbeat outliving its TTL, compare-and-delete, abandoned job requeued, grace period for a fresh claim, conditional requeue, failed republish |
+| Admin | 403/401, ordering and pagination covering every row once, fresh budget with continuous numbering, 409/404, concurrent retries, failed publish leaves the job `DEAD` |
+| Concurrency | 100 simultaneous requests — more than the pool plus the threadpool — complete without the Phase 17 deadlock |
 
 The worker tests call `process_job` directly against the test database rather
 than running a live consumer: a real one would make the suite wait out 5s + 25s
@@ -719,12 +727,15 @@ and a file written from the API side is readable by the worker.
 
 ### `restart: unless-stopped`
 
-On all five services, after a Docker Desktop auto-update once killed every
+On all six services, after a Docker Desktop auto-update once killed every
 container at once with exit 255.
 
 Note this does **not** cover `docker stop` or `docker kill` — Docker skips the
 restart policy for containers stopped manually. It covers a container that dies
-on its own. Demonstrated by stopping RabbitMQ: the worker (which has no
+on its own. Nor does it act on a failing healthcheck: a reaper that stays alive
+but stops scanning shows as `unhealthy` in `docker compose ps` and stays that
+way until a human or an external tool (an orchestrator, an autoheal sidecar)
+restarts it. Demonstrated by stopping RabbitMQ: the worker (which has no
 auto-reconnect by design) crash-looped 12 times, then stabilized by itself once
 the broker returned, and processed the next job normally.
 
@@ -839,3 +850,90 @@ specific message, and since Phase 15b it survives recreation — so every
 dead-lettered message is kept forever, including for jobs later retried. The
 view is unaffected (it reads Postgres), but the queue wants an `x-max-length` or
 message TTL, which, being a queue argument, means redeclaring it.
+
+## Load testing
+
+Full write-up, generated from the raw run data:
+[benchmarks/phase17_results.md](backend/benchmarks/phase17_results.md).
+
+Locust against the Compose stack over real HTTP. Reads go to the `bench-NN`
+accounts that own the Phase 14 rows (~10K jobs each), since a fresh account's
+job list is fast with or without an index. Submissions go to dedicated
+`loadtest-NN` accounts. Each simulated user waits 1–3 s between requests. Load
+generator and server share one 6-core laptop.
+
+| Users | Before the fix | After the fix |
+|---|---|---|
+| 10 | 0 failed · p50 15 ms · p95 33 ms | 0 failed · p50 15 ms · p95 41 ms |
+| 100 | **40 × 500**, a 30 s freeze · p99 31 s | 0 failed · 47 req/s · p50 25 ms · p95 150 ms |
+| 1,000 | **93.6% failed** · 13 req/s | 0 failed · 77 req/s · p50 10 s (saturated) |
+
+### The bottleneck at 100 users was a deadlock, not load
+
+At 34 req/s the API froze for 30 s: its CPU dropped to 0.2%, all 15 pooled
+connections sat `idle in transaction`, and even `/health` got no answer. Then
+exactly 40 requests failed with `QueuePool limit ... timeout 30.00`.
+
+FastAPI runs each sync dependency, the endpoint, and response validation as
+separate trips into one 40-thread pool, and a request holds its DB connection
+across all of them from `get_current_user` on. Once more than 15 + 40 requests
+are in flight, every connection can be held by a request waiting for a thread,
+and every thread by a request waiting for a connection. It stays stuck until
+`pool_timeout` fails the 40 waiting threads. `loadtest/burst.py` reproduces it
+on demand: 50 simultaneous requests pass and 60 wedge.
+
+**A bigger pool doesn't fix it.** At 40 connections the threshold only moves to
+80: 100 simultaneous requests wedged the same way. The fix,
+[concurrency_limit.py](backend/app/concurrency_limit.py), caps in-flight
+requests per process at the pool size. A checkout then never waits and the
+cycle can't form. Requests over the cap wait in the event loop holding nothing.
+A regression test fires 100 simultaneous requests. Without the cap it fails with
+pool timeouts and a 61 s request; with the cap it passes in ~3 s.
+
+### After the fix, the ceiling is one Python process
+
+At 1,000 users the API runs at 144% CPU (one core of Python plus the work that
+runs outside the GIL), while Postgres has a median of **0** connections running a
+query. The 10 s p50 is queueing, not slow queries: 1,000 users ÷ (10 s + 2 s
+think time) ≈ 83 req/s against 77 measured. Four Uvicorn processes raised
+throughput **2.1×**, to 161 req/s, confirming the single process is the limit.
+It didn't reach 4× because the laptop's 6 cores are shared with Postgres and
+Locust.
+
+A py-spy profile of the saturated API puts 41% of GIL time in SQLAlchemy's
+per-statement machinery and ~29% in FastAPI and anyio's threadpool dispatch, but
+only 1.4% in the Postgres driver. The same list request costs Postgres 2.3 ms,
+and the Phase 14b page query is **0.061 ms, unchanged under load**. The
+`COUNT(*)` for the page total is now 96% of the request's database time, because
+it reads every one of the user's ~10K rows.
+
+The single worker kept up at every level: queue delay p50 was 125 ms at 1,000
+users, and every run drained within a second of its last submission.
+
+### Running it
+
+```bash
+cd backend
+pip install -r requirements-dev.txt                       # Locust stays out of the images
+python -m loadtest.seed_loadtest_users                    # once: 50 loadtest-NN accounts
+python -m loadtest.run 1000 50 180 u1000                  # Locust + sampler + queue delay → benchmarks/phase17/raw/
+python scripts/render_loadtest.py                         # → benchmarks/phase17_results.md
+```
+
+Tokens are minted with the app's own `create_access_token` rather than obtained
+from `/auth/login`. Login is limited to 10/min per IP, and every simulated user
+shares one IP. `*@taskflow.local` also can't log in over HTTP at all: `.local` is
+a special-use domain, which `EmailStr` rejects. **Login latency is not measured.**
+
+### Known gaps
+
+- **Saturation reports as unhealthy.** Past saturation, `/health` waits behind
+  the cap too (~10 s at 1,000 users, over the healthcheck's 5 s timeout). Compose
+  only reports that. An orchestrator that restarts on failed liveness checks
+  would need a liveness endpoint that bypasses the cap and the database.
+- **No load shedding.** Waiting requests queue without bound. A limit answered
+  with `503` is the next step for sustained overload.
+- **One unexplained stall.** At 10 users the server paused once for ~1.9 s, seen
+  by both Locust and the independent `/health` probe. A Postgres checkpoint
+  overlapped it, but a forced checkpoint of similar size caused no stall, so the
+  cause is unknown.

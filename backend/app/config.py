@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
+    # Postgres connections per process — SQLAlchemy's own defaults, made
+    # explicit because the API's in-flight request limit is derived from them
+    # (see app/concurrency_limit.py).
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+
     # Total tries per job, including the first. 3 = one attempt plus two
     # retries, so job_retry_delays needs (job_max_attempts - 1) entries.
     job_max_attempts: int = 3

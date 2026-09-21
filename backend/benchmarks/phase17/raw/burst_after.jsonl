@@ -1,0 +1,3 @@
+{"n": 60, "outcomes": {"200": 60}, "p50_ms": 1745, "max_ms": 2028, "peak_idle_in_transaction": 15, "full_pool_idle_samples": 1, "samples": 5}
+{"n": 100, "outcomes": {"200": 100}, "p50_ms": 595, "max_ms": 1023, "peak_idle_in_transaction": 8, "full_pool_idle_samples": 0, "samples": 3}
+{"n": 200, "outcomes": {"200": 200}, "p50_ms": 1295, "max_ms": 2314, "peak_idle_in_transaction": 10, "full_pool_idle_samples": 0, "samples": 6}

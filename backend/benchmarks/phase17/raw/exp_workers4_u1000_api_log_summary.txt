@@ -1,0 +1,31 @@
+status codes (server side): {'200': 27377, '201': 1563}
+non-access-log lines: 28
+
+INFO:pika.adapters.utils.connection_workflow:Pika version 1.4.4 connecting to ('172.22.0.2', 5672)
+INFO:pika.adapters.utils.io_services_utils:Socket connected: <socket.socket fd=39, family=2, type=1, proto=6, laddr=('172.22.0.7', 42734), raddr=('172.22.0.2', 5672)>
+INFO:pika.adapters.utils.connection_workflow:Streaming transport linked up: (<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7f3dfd38df90>, _StreamingProtocolShim: <SelectConnection PROTOCOL transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7f3dfd38df90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>).
+INFO:pika.adapters.utils.connection_workflow:Pika version 1.4.4 connecting to ('172.22.0.2', 5672)
+INFO:pika.adapters.utils.io_services_utils:Socket connected: <socket.socket fd=40, family=2, type=1, proto=6, laddr=('172.22.0.7', 42738), raddr=('172.22.0.2', 5672)>
+INFO:pika.adapters.utils.connection_workflow:Streaming transport linked up: (<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x750b28813510>, _StreamingProtocolShim: <SelectConnection PROTOCOL transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x750b28813510> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>).
+INFO:pika.adapters.utils.connection_workflow:AMQPConnector - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7f3dfd38df90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.utils.connection_workflow:AMQPConnectionWorkflow - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7f3dfd38df90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Connection workflow succeeded: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7f3dfd38df90> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Created channel=1
+INFO:pika.adapters.utils.connection_workflow:AMQPConnector - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x750b28813510> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.utils.connection_workflow:AMQPConnectionWorkflow - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x750b28813510> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Connection workflow succeeded: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x750b28813510> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Created channel=1
+INFO:pika.adapters.utils.connection_workflow:Pika version 1.4.4 connecting to ('172.22.0.2', 5672)
+INFO:pika.adapters.utils.io_services_utils:Socket connected: <socket.socket fd=51, family=2, type=1, proto=6, laddr=('172.22.0.7', 42754), raddr=('172.22.0.2', 5672)>
+INFO:pika.adapters.utils.connection_workflow:Streaming transport linked up: (<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7c144efc5210>, _StreamingProtocolShim: <SelectConnection PROTOCOL transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7c144efc5210> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>).
+INFO:pika.adapters.utils.connection_workflow:AMQPConnector - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7c144efc5210> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.utils.connection_workflow:AMQPConnectionWorkflow - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7c144efc5210> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Connection workflow succeeded: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x7c144efc5210> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Created channel=1
+INFO:pika.adapters.utils.connection_workflow:Pika version 1.4.4 connecting to ('172.22.0.2', 5672)
+INFO:pika.adapters.utils.io_services_utils:Socket connected: <socket.socket fd=91, family=2, type=1, proto=6, laddr=('172.22.0.7', 51028), raddr=('172.22.0.2', 5672)>
+INFO:pika.adapters.utils.connection_workflow:Streaming transport linked up: (<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x71ed13bf1bd0>, _StreamingProtocolShim: <SelectConnection PROTOCOL transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x71ed13bf1bd0> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>).
+INFO:pika.adapters.utils.connection_workflow:AMQPConnector - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x71ed13bf1bd0> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.utils.connection_workflow:AMQPConnectionWorkflow - reporting success: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x71ed13bf1bd0> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Connection workflow succeeded: <SelectConnection OPEN transport=<pika.adapters.utils.io_services_utils._AsyncPlaintextTransport object at 0x71ed13bf1bd0> params=<URLParameters host=rabbitmq port=5672 virtual_host=/ ssl=False>>
+INFO:pika.adapters.blocking_connection:Created channel=1

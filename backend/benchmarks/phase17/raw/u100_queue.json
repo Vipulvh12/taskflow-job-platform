@@ -1,0 +1,22 @@
+{
+  "statuses": {
+    "SUCCESS": 291
+  },
+  "still_pending": 0,
+  "waited_for_drain_s": 0.0,
+  "succeeded": 291,
+  "queue_delay_ms": {
+    "p50": 25.8,
+    "p95": 115.0,
+    "p99": 178.6,
+    "max": 288.4
+  },
+  "end_to_end_ms": {
+    "p50": 39.7,
+    "p95": 128.4,
+    "p99": 196.2,
+    "max": 323.9
+  },
+  "submitted_over_s": 110.783277,
+  "last_completed_after_last_submitted_s": 0.055482
+}

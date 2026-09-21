@@ -1,0 +1,5 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/jobs [submit],LocustBadStatusCode(code=500),3,2026-09-21T14:15:22Z,2026-09-21T14:15:22Z
+GET,/jobs [list],LocustBadStatusCode(code=500),21,2026-09-21T14:15:22Z,2026-09-21T14:15:22Z
+GET,/jobs [filtered],LocustBadStatusCode(code=500),10,2026-09-21T14:15:22Z,2026-09-21T14:15:22Z
+GET,/jobs/{id},LocustBadStatusCode(code=500),6,2026-09-21T14:15:22Z,2026-09-21T14:15:22Z
