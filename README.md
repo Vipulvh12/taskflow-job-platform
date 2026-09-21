@@ -20,11 +20,13 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 ## Status
 
 **MVP complete (Phases 1–14), V2 in progress.** The whole system runs from
-`docker compose up`, is covered by a 90-test suite against real infrastructure,
+`docker compose up`, is covered by a 99-test suite against real infrastructure,
 has benchmarked indexes, recovers automatically from a worker dying mid-job
-(Phase 15), gives admins a dead-letter view with manual retry (Phase 16), and
-has been load tested to 1,000 concurrent users — which found, and fixed, a
-deadlock that froze the API at 100 (Phase 17).
+(Phase 15), and gives admins a dead-letter view with manual retry (Phase 16). It
+has been load tested to 1,000 concurrent users with 0% failures, after the load
+test found and fixed a deadlock that froze the API at 100 (Phase 17). Request
+bodies are capped at 128 KiB, and a GitHub Actions workflow lints, checks
+migrations, tests and builds on every push.
 
 ## Running it
 
@@ -562,6 +564,8 @@ taskflow/
 │   ├── benchmarks/   # Phase 14 and 17 results, generated from raw data
 │   └── tests/
 ├── frontend/         # React dashboard
+├── docs/             # design notes (per-job timeout)
+├── .github/workflows/ci.yml
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
@@ -649,7 +653,7 @@ docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "CREATE DATABASE
 pytest -q
 ```
 
-90 tests, ~90s, against **real** infrastructure rather than mocks. That is a
+99 tests, ~110s, against **real** infrastructure rather than mocks. That is a
 deliberate choice: the two hardest bugs in this project so far — the idempotency
 race and the stale broker connection — both lived precisely in behaviour a mock
 would have faked away.
@@ -684,6 +688,7 @@ everything. `publish_job` takes a `queue_name` for that reason.
 | Heartbeats & reaper | atomic claim (two deliveries run once), heartbeat outliving its TTL, compare-and-delete, abandoned job requeued, grace period for a fresh claim, conditional requeue, failed republish |
 | Admin | 403/401, ordering and pagination covering every row once, fresh budget with continuous numbering, 409/404, concurrent retries, failed publish leaves the job `DEAD` |
 | Concurrency | 100 simultaneous requests — more than the pool plus the threadpool — complete without the Phase 17 deadlock |
+| Request-body limit | largest legitimate submission accepted, exact-limit vs limit+1, a body the endpoint never reads, 30 MB login rejected before its rate limiter runs, and via raw ASGI: 0 bytes read with `Content-Length`, at most one chunk past the limit when chunked |
 
 The worker tests call `process_job` directly against the test database rather
 than running a live consumer: a real one would make the suite wait out 5s + 25s
@@ -890,29 +895,45 @@ cycle can't form. Requests over the cap wait in the event loop holding nothing.
 A regression test fires 100 simultaneous requests. Without the cap it fails with
 pool timeouts and a 61 s request; with the cap it passes in ~3 s.
 
-### After the fix, the ceiling is one Python process
+### After the fix: performance
 
-At 1,000 users the API runs at 144% CPU (one core of Python plus the work that
-runs outside the GIL), while Postgres has a median of **0** connections running a
-query. The 10 s p50 is queueing, not slow queries: 1,000 users ÷ (10 s + 2 s
-think time) ≈ 83 req/s against 77 measured. More Uvicorn processes confirmed the
-single process is the limit, sublinearly because the laptop's 6 cores are
-shared with Postgres and Locust:
+**0% failures at every level, including 1,000 users.** Same scenario and
+harness throughout:
 
-| Uvicorn processes | req/s at 1,000 users | p50 | Failed |
-|---|---|---|---|
-| 1 | 77 | 10 s | 0 |
-| **2 (the default now)** | **112** | **6.4 s** | 0 |
-| 4 (experiment) | 161 | 3.6 s | 0 |
+| API configuration | 100 users | 1,000 users |
+|---|---|---|
+| 1 Uvicorn process | 47 req/s · p50 25 ms · p99 340 ms | 77 req/s · p50 10 s |
+| **2 Uvicorn processes — the current configuration** | 46 req/s · p50 24 ms · p99 2.2 s | **112 req/s · p50 6.4 s** |
+| 4 Uvicorn processes — *an experiment only, not deployed* | — | 161 req/s · p50 3.6 s |
 
-The API now runs **two processes** (`WEB_CONCURRENCY: "2"` in `docker-compose.yml`).
-That's 30 of Postgres's 100 connections: each process has its own pool of 15 and
-its own in-flight cap of 15, so the deadlock fix holds per process. Verified
-live, since the pytest regression test runs in-process and can't see two
-processes: 60, 100 and 200 simultaneous requests all returned 200, and
-connections peaked at 32 under 1,000 users. At 10 and 100 users the medians are
-unchanged (p50 18 ms and 24 ms), because the load there is set by the simulated
-users, not by server capacity.
+- **1,000 users saturate the API; they don't break it.** With one process, the
+  API runs at 144% CPU (one core of Python plus the work that runs outside the
+  GIL), while Postgres has a median of **0** connections running a query. The
+  10 s p50 is queueing, not slow queries: 1,000 users ÷ (10 s + 2 s think time)
+  ≈ 83 req/s against 77 measured. More processes raise the ceiling, sublinearly,
+  because the laptop's 6 cores are shared with Postgres and Locust.
+- **At 100 users the API isn't the constraint.** The request rate is set by the
+  simulated users, so the medians barely move between 1 and 2 processes. The p99
+  difference (340 ms vs 2.2 s) comes from the unexplained pauses described under
+  [Known limitations](#known-limitations-and-future-work), not from the process
+  count. One 2 s pause with ~100 requests in flight is enough to set a 2-minute
+  run's p99.
+
+### Two API processes, each with its own pool and cap
+
+The API runs **two Uvicorn processes** (`WEB_CONCURRENCY: "2"` in
+`docker-compose.yml`, which uvicorn reads as its `--workers` default). Each
+process has its **own** 15-connection pool and its **own** in-flight cap of 15,
+computed from the same settings. So the deadlock fix holds per process, and the
+API uses at most 30 of Postgres's 100 connections, shared with the worker and
+reaper.
+
+Verified live, since the pytest regression test runs in-process and can't see
+two processes: 60, 100 and 200 simultaneous requests all returned 200, and
+connections peaked at 32 under 1,000 users. The image's CMD keeps `exec`, so
+Uvicorn is PID 1. Without it, `sh` stays PID 1, `docker stop`'s SIGTERM never
+reaches Uvicorn, and it's SIGKILLed with no graceful shutdown (exit 137;
+measured).
 
 A py-spy profile of the saturated API puts 41% of GIL time in SQLAlchemy's
 per-statement machinery and ~29% in FastAPI and anyio's threadpool dispatch, but
@@ -939,18 +960,107 @@ from `/auth/login`. Login is limited to 10/min per IP, and every simulated user
 shares one IP. `*@taskflow.local` also can't log in over HTTP at all: `.local` is
 a special-use domain, which `EmailStr` rejects. **Login latency is not measured.**
 
-### Known gaps
+Load-testing limitations (saturation reported as unhealthy, no load shedding,
+the unexplained pauses) are listed under
+[Known limitations](#known-limitations-and-future-work).
 
-- **Saturation reports as unhealthy.** Past saturation, `/health` waits behind
-  the cap too (~10 s at 1,000 users, over the healthcheck's 5 s timeout). Compose
-  only reports that. An orchestrator that restarts on failed liveness checks
-  would need a liveness endpoint that bypasses the cap and the database.
-- **No load shedding.** Waiting requests queue without bound. A limit answered
-  with `503` is the next step for sustained overload.
-- **Unexplained server stalls.** Below saturation the server occasionally pauses
-  for 1–2.4 s. Locust and the independent `/health` probe both see these pauses,
-  in 3 of the 4 unsaturated runs after the fix. They set the p99 at 10 and 100
-  users: 2.2 s in the 2-process 100-user run, against 340 ms in the 1-process
-  one, which comes down to one pause more or less, not the process count. A
-  Postgres checkpoint is ruled out. Memory pressure looks unlikely, but the I/O
-  stall counter moved, which is a lead.
+## Request-body limit
+
+Every request body is capped at **128 KiB** (`MAX_REQUEST_BODY_BYTES`), using
+Starlette's `RequestBodyLimitMiddleware`, wired up in
+[body_limit.py](backend/app/body_limit.py).
+
+**Why.** Before this, a 30 MB *unauthenticated* `POST /auth/login` was read,
+JSON-parsed and validated in full, then rejected with a 422. That took 1.64 s
+and added 57 MB of API memory, per request. FastAPI reads the body before any
+dependency runs, so the login rate limiter never got a say.
+
+**Why 128 KiB.** The largest legitimate body is a job submission at the 64 KiB
+payload cap. Even pretty-printed, with a 255-character idempotency key, it's
+65,893 bytes; every other endpoint's body is under ~350 bytes. 128 KiB is about
+2× the largest legitimate body. The API refuses to start if the setting is too
+small to hold a capped payload.
+
+**How it rejects.** With a `Content-Length` over the limit, the app's first
+read of the body fails before a single byte is read. A chunked body is cut off
+at the limit plus one chunk. Either way the client gets a 413 in the standard
+envelope, `{"error": {"code": "payload_too_large", ...}}`. The library's own
+response is plain text, so a small wrapper rewrites it, because the frontend
+reads `error.message`. The middleware sits inside CORS, so a browser can read
+the 413.
+
+**Verified.** Nine tests. The key one drives the app directly with a body
+reader that counts bytes: a 30 MB login with `Content-Length` pulls **0**
+bytes, and a chunked one stops within one chunk of the limit. The largest
+legitimate submission still succeeds, a body of exactly the limit gets through
+to the JSON parser, and one byte more is rejected. With the middleware removed, the 5 over-limit
+tests fail. Live, the 30 MB login now gets a 413 in 0.03–0.09 s with API memory
+flat. `curl`, which asks the server before uploading a large body (`Expect:
+100-continue`), uploaded 0 of its 30,000,038 bytes.
+
+## CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push and pull
+request, in one job on `ubuntu-latest` with Python 3.11, the Dockerfile's
+version:
+
+```
+install requirements-dev.txt
+  → ruff (lint)
+  → alembic upgrade head + alembic check on an empty database (migrations match the models)
+  → pytest, the full suite
+  → docker build --target api, --target worker
+```
+
+- **Real infrastructure, as locally.** The tests run against Postgres 16,
+  Redis 7 and RabbitMQ 3 service containers: the `docker-compose.yml` images,
+  on the ports `backend/.env.test` expects. Each has a healthcheck, which GitHub
+  waits on before running steps.
+- **CI's Postgres uses a throwaway password.** `pytest.ini` lets `.env.test`
+  override the environment (a safety rail), so the job rewrites `DATABASE_URL`
+  in its own checkout. The conftest checks (database `taskflow_test`, Redis db 1)
+  still apply.
+- **Lint checks for bugs, not style.** `ruff.toml` selects pyflakes plus
+  pycodestyle's error checks explicitly, so a ruff upgrade can't change what CI
+  enforces. Its first run found four model names used only in `Mapped["..."]`
+  annotations, now imported under `TYPE_CHECKING`, and an unused test variable.
+
+**Status: not yet run on GitHub.** This repository has no remote. The workflow
+passes `actionlint`, and every step was re-enacted locally in a fresh `git clone`
+against service containers started with the workflow's exact images, credentials,
+ports and healthchecks: lint clean, 3 migrations applied and no drift, **99
+passed**, both images built. Linux-specific details (the runner's shell,
+`setup-python`'s cache) can only be confirmed by the first real run.
+
+## Known limitations and future work
+
+- **No per-job execution timeout.** A handler that never returns keeps its
+  heartbeat alive, so the reaper never intervenes and the job stays `RUNNING`
+  indefinitely. Python can't safely kill a thread from another thread. The
+  options, with measured process start costs, are compared in
+  [docs/per-job-timeout.md](docs/per-job-timeout.md). The recommendation for V3
+  is a long-lived child process per worker that is killed and replaced on
+  timeout, plus a cooperative deadline in `JobContext`. Not implemented.
+- **Unexplained pauses.** During the 10- and 100-user runs, with 1 and with 2
+  processes, the server occasionally paused for 1–2.4 s. Locust and a separate
+  `/health` probe both saw them, so they happened on the server. They set the
+  p99 at those load levels. **The cause is unknown.** A Postgres checkpoint is
+  ruled out (a forced one caused no pause), and memory pressure looks unlikely
+  (the VM's memory-stall counter and swap-outs didn't move across a 1,000-user
+  run).
+- **Saturation looks like ill health.** Past saturation, `/health` waits behind
+  the in-flight cap too: ~10 s at 1,000 users, over the healthcheck's 5 s
+  timeout. Compose only reports that. An orchestrator that *restarts* on a
+  failed liveness check would restart a working, saturated API, so `/health`
+  would need splitting into a liveness check (no cap, no database) and a
+  readiness check.
+- **No load shedding.** Requests over the cap queue without bound. A limit
+  answered with `503` is the next step for sustained overload.
+- **The reaper's healthcheck only reports.** A reaper that stops scanning shows
+  `unhealthy`, and nothing restarts it.
+- **`jobs.dlq` only grows** (see the admin section). It needs a length cap or
+  message TTL, which means redeclaring the queue.
+- **Login throughput is untested.** The load test mints tokens (see above).
+- **Single-node datastores.** One Postgres, one Redis and one RabbitMQ, with no
+  replication — in scope for a one-host deployment, not beyond it.
+- **CI hasn't run on GitHub yet** (see above).
