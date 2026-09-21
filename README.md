@@ -19,16 +19,13 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-Phase 13 complete: the whole backend runs as containers. `docker compose up`
-brings up all five services with no `pip install`, `alembic upgrade` or
-`uvicorn` step on the host.
-
-Still to come: the indexing benchmark (14).
+**MVP complete (Phases 1–14).** The whole system runs from `docker compose up`,
+is covered by a 59-test suite against real infrastructure, and its indexes have
+been benchmarked with measured before/after numbers rather than assumed.
 
 ## Running it
 
-Three processes: the infrastructure containers, the API, and at least one
-worker.
+Everything but the frontend runs in Compose:
 
 ```bash
 docker compose up --build -d     # postgres, redis, rabbitmq, api, worker
@@ -81,10 +78,13 @@ records the outcome as both a `jobs` status change and a `job_attempts` row.
   acked. At-least-once delivery means redelivery is normal (worker crash,
   connection drop between commit and ack); without this guard the handler would
   run twice.
-- **Ack unconditionally** — `SUCCESS` and `FAILED` are both outcomes already
-  committed. Redelivery is only wanted when the worker *process* dies mid-job,
-  and then the ack line is never reached, so the broker's requeue-on-disconnect
-  covers it with no explicit nack logic.
+- **The message's fate is decided separately from the job's.** `process_job`
+  returns a `Disposition`: `ACK` for a finished or skipped job, `RETRY` to
+  republish onto a delay queue, `DEAD_LETTER` to `nack(requeue=False)` into the
+  DLQ. Keeping AMQP out of `process_job` is also what lets the tests exercise it
+  with no channel and no mock. A worker that dies mid-job never reaches its
+  ack/nack, so the broker's requeue-on-disconnect covers the one case where
+  redelivery is wanted.
 - **Handler exceptions are caught per job** — one bad payload must not kill the
   consume loop.
 
@@ -648,3 +648,51 @@ restart policy for containers stopped manually. It covers a container that dies
 on its own. Demonstrated by stopping RabbitMQ: the worker (which has no
 auto-reconnect by design) crash-looped 12 times, then stabilized by itself once
 the broker returned, and processed the next job normally.
+
+## Index benchmark
+
+Full write-up with plans and methodology: [benchmarks/phase14_results.md](backend/benchmarks/phase14_results.md).
+
+Measured at 200,000 rows with `EXPLAIN (ANALYZE, BUFFERS)` against the **exact**
+SQL the API emits, median of 6 warm runs:
+
+| Query | No index | With Phase 2 indexes | Speedup |
+|---|---|---|---|
+| Highest-priority queued jobs | 34.33 ms · 3,150 pages | 0.077 ms · 35 pages | **446×** |
+| Count of a user's queued jobs | 25.49 ms · 3,078 pages | 0.481 ms · 5 pages | **53×** |
+| A user's queued jobs, newest first | 22.58 ms | 2.43 ms | **9×** |
+| A user's jobs, newest first (default page) | 24.42 ms | 9.05 ms | 3× |
+
+Three findings the headline numbers hide:
+
+- **The unique constraint's index was already doing half the work.**
+  `uq_jobs_user_idempotency_key` leads with `user_id`, so it serves every
+  `WHERE user_id = ?`. Dropping `idx_jobs_user_status` didn't produce a seq scan —
+  the planner switched indexes. The "no index" column above needed index paths
+  disabled for the session to measure honestly.
+- **The most frequently run query gets nothing from either Phase 2 index.** The
+  default job list — polled every 2s — runs an identical plan with or without
+  them, because its cost is in `ORDER BY created_at DESC`, not the `WHERE`. A
+  candidate `(user_id, created_at DESC, id DESC)` index took it from **9.05 ms to
+  0.050 ms (181×)**. Measured and dropped, not added: that is a schema change for
+  its own migration.
+- **The biggest win serves a query nothing runs yet.** `idx_jobs_status_priority`
+  is the 446× result, but RabbitMQ orders the worker's jobs, not Postgres. It
+  earns its keep once an admin view or scheduler asks for the next queued job.
+
+At the original 447 rows every query was under half a millisecond with or without
+indexes — an index only pays once the table is large *and* the predicate
+selective.
+
+### The seeded rows are still there
+
+The 199,553 benchmark rows belong to dedicated `bench-NN@taskflow.local` users,
+not real accounts — seeded jobs in `QUEUED`/`RUNNING`/`RETRYING` have no queue
+message behind them and never settle, so attached to a real account they would
+keep its job list polling every 2s. Left in place for V2 load testing. To remove:
+
+```sql
+DELETE FROM jobs WHERE user_id IN
+    (SELECT id FROM users WHERE email LIKE 'bench-%@taskflow.local');
+DELETE FROM users WHERE email LIKE 'bench-%@taskflow.local';
+```

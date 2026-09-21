@@ -1,0 +1,62 @@
+{
+ "label": "A2_small_noindex",
+ "table_rows": 447,
+ "results": [
+  {
+   "query": "list_default",
+   "user_id": "0c8119fc-a63b-4a0e-8e25-0da56e8d5324",
+   "user_rows": 443,
+   "plan": "Limit > Sort > Seq Scan",
+   "cold_ms": 1.725,
+   "warm_median_ms": 0.377,
+   "warm_min_ms": 0.351,
+   "planning_ms": 0.115,
+   "rows_returned": 20,
+   "shared_hit": 12,
+   "shared_read": 0,
+   "text_plan": "Limit  (cost=29.38..29.43 rows=20 width=375) (actual time=0.299..0.305 rows=20 loops=1)\n  Buffers: shared hit=12\n  ->  Sort  (cost=29.38..30.48 rows=443 width=375) (actual time=0.298..0.301 rows=20 loops=1)\n        Sort Key: created_at DESC, id DESC\n        Sort Method: top-N heapsort  Memory: 35kB\n        Buffers: shared hit=12\n        ->  Seq Scan on jobs  (cost=0.00..17.59 rows=443 width=375) (actual time=0.008..0.120 rows=443 loops=1)\n              Filter: (user_id = '0c8119fc-a63b-4a0e-8e25-0da56e8d5324'::uuid)\n              Rows Removed by Filter: 4\n              Buffers: shared hit=12\nPlanning Time: 0.106 ms\nExecution Time: 0.326 ms"
+  },
+  {
+   "query": "list_filtered",
+   "user_id": "0c8119fc-a63b-4a0e-8e25-0da56e8d5324",
+   "user_rows": 443,
+   "plan": "Limit > Sort > Seq Scan",
+   "cold_ms": 0.253,
+   "warm_median_ms": 0.244,
+   "warm_min_ms": 0.22,
+   "planning_ms": 0.091,
+   "rows_returned": 20,
+   "shared_hit": 12,
+   "shared_read": 0,
+   "text_plan": "Limit  (cost=28.66..28.71 rows=20 width=375) (actual time=0.416..0.422 rows=20 loops=1)\n  Buffers: shared hit=12\n  ->  Sort  (cost=28.66..29.59 rows=374 width=375) (actual time=0.414..0.417 rows=20 loops=1)\n        Sort Key: created_at DESC, id DESC\n        Sort Method: top-N heapsort  Memory: 30kB\n        Buffers: shared hit=12\n        ->  Seq Scan on jobs  (cost=0.00..18.70 rows=374 width=375) (actual time=0.010..0.179 rows=374 loops=1)\n              Filter: ((user_id = '0c8119fc-a63b-4a0e-8e25-0da56e8d5324'::uuid) AND ((status)::text = 'QUEUED'::text))\n              Rows Removed by Filter: 73\n              Buffers: shared hit=12\nPlanning Time: 0.137 ms\nExecution Time: 0.445 ms"
+  },
+  {
+   "query": "count_filtered",
+   "user_id": "0c8119fc-a63b-4a0e-8e25-0da56e8d5324",
+   "user_rows": 443,
+   "plan": "Aggregate > Seq Scan",
+   "cold_ms": 0.237,
+   "warm_median_ms": 0.214,
+   "warm_min_ms": 0.155,
+   "planning_ms": 0.083,
+   "rows_returned": 1,
+   "shared_hit": 12,
+   "shared_read": 0,
+   "text_plan": "Aggregate  (cost=19.64..19.65 rows=1 width=8) (actual time=0.234..0.235 rows=1 loops=1)\n  Buffers: shared hit=12\n  ->  Seq Scan on jobs  (cost=0.00..18.70 rows=374 width=0) (actual time=0.013..0.185 rows=374 loops=1)\n        Filter: ((user_id = '0c8119fc-a63b-4a0e-8e25-0da56e8d5324'::uuid) AND ((status)::text = 'QUEUED'::text))\n        Rows Removed by Filter: 73\n        Buffers: shared hit=12\nPlanning Time: 0.119 ms\nExecution Time: 0.260 ms"
+  },
+  {
+   "query": "priority_queue",
+   "user_id": null,
+   "user_rows": null,
+   "plan": "Limit > Sort > Seq Scan",
+   "cold_ms": 0.364,
+   "warm_median_ms": 0.319,
+   "warm_min_ms": 0.221,
+   "planning_ms": 0.075,
+   "rows_returned": 50,
+   "shared_hit": 12,
+   "shared_read": 0,
+   "text_plan": "Limit  (cost=30.11..30.24 rows=50 width=18) (actual time=0.276..0.288 rows=50 loops=1)\n  Buffers: shared hit=12\n  ->  Sort  (cost=30.11..31.05 rows=377 width=18) (actual time=0.275..0.280 rows=50 loops=1)\n        Sort Key: priority DESC\n        Sort Method: top-N heapsort  Memory: 28kB\n        Buffers: shared hit=12\n        ->  Seq Scan on jobs  (cost=0.00..17.59 rows=377 width=18) (actual time=0.009..0.172 rows=377 loops=1)\n              Filter: ((status)::text = 'QUEUED'::text)\n              Rows Removed by Filter: 70\n              Buffers: shared hit=12\nPlanning Time: 0.072 ms\nExecution Time: 0.311 ms"
+  }
+ ]
+}
