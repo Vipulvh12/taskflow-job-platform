@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     DateTime,
@@ -15,6 +16,12 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    # For the Mapped["..."] annotations only. SQLAlchemy resolves those names
+    # through its registry at runtime; importing them for real would be circular.
+    from app.models.job_attempt import JobAttempt
+    from app.models.user import User
 
 
 class Job(Base):

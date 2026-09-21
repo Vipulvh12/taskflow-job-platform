@@ -193,7 +193,7 @@ def test_live_heartbeat_protects_a_job(db):
 
 def test_freshly_claimed_job_gets_a_grace_period(db):
     """Covers the gap between the worker committing RUNNING and its first beat."""
-    job = _job(db, status=JobStatus.RUNNING.value, started_at=datetime.now(timezone.utc))
+    _job(db, status=JobStatus.RUNNING.value, started_at=datetime.now(timezone.utc))
     assert reap_once(db, publish=Recorder()) == []
 
 

@@ -2,3 +2,4 @@
 # requirements.txt only). Install with: pip install -r requirements-dev.txt
 -r requirements.txt
 locust>=2.20
+ruff==0.16.8

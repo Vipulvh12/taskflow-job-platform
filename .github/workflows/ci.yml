@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+
+    # The same images as docker-compose.yml, published on the ports
+    # backend/.env.test expects. The integration tests run against real
+    # Postgres, Redis and RabbitMQ, not mocks.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: taskflow
+          # A throwaway credential for this container only.
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: taskflow_test
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U taskflow -d taskflow_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports: ["5672:5672"]
+        # check_port_connectivity, not ping: ping passes before the AMQP
+        # listener accepts connections (see the README's startup ordering).
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 10s --health-timeout 10s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"  # the Dockerfile's python:3.11-slim
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Migrations match the models
+        # Upgrades an empty database through every migration, then fails if
+        # the models describe anything the migrations don't.
+        env:
+          DATABASE_URL: postgresql://taskflow:ci-only-password@localhost:5433/taskflow_migrations
+          REDIS_URL: redis://localhost:6379/0
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672/
+          JWT_SECRET: ci-only-not-a-secret-padded-to-32-bytes
+        run: |
+          python -c "
+          import psycopg2
+          conn = psycopg2.connect('postgresql://taskflow:ci-only-password@localhost:5433/taskflow_test')
+          conn.autocommit = True
+          conn.cursor().execute('CREATE DATABASE taskflow_migrations')
+          "
+          alembic upgrade head
+          alembic check
+
+      - name: Point the tests at this job's Postgres
+        # pytest.ini lets .env.test override the environment (a safety rail),
+        # so the URL is changed in the file — in this checkout only. The
+        # conftest guards (database taskflow_test, Redis db 1) still apply.
+        run: >-
+          sed -i
+          's#^DATABASE_URL=.*#DATABASE_URL=postgresql://taskflow:ci-only-password@localhost:5433/taskflow_test#'
+          .env.test
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Build Docker images
+        run: |
+          docker build --target api -t taskflow-api:ci .
+          docker build --target worker -t taskflow-worker:ci .
