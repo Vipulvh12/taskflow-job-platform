@@ -1,10 +1,13 @@
 import json
 import logging
+import socket
+import threading
 import uuid
 from datetime import datetime, timezone
 from enum import Enum, auto
 
 import pika
+from sqlalchemy import update
 
 from app.config import settings
 from app.core.enums import JobStatus
@@ -20,9 +23,14 @@ from app.queue_topology import (
 from app.job_types import JOB_PAYLOAD_SCHEMAS
 from worker.handlers import load_handlers
 from worker.handlers.registry import HandlerError, JobContext, get_handler, registered_types
+from worker.heartbeat import HEARTBEAT_INTERVAL_SECONDS, clear_heartbeat, send_heartbeat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow.worker")
+
+# Unique per process. Hostname makes it readable in `redis-cli GET` (it is the
+# container id under Compose); the suffix keeps two processes on one host apart.
+WORKER_ID = f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
 
 
 class Disposition(Enum):
@@ -35,65 +43,137 @@ class Disposition(Enum):
     DEAD_LETTER = auto()  # nack(requeue=False) so the broker routes it to the DLQ
 
 
+def _claim(db, jid: uuid.UUID, started_at: datetime) -> bool:
+    """Atomically take ownership of a job: QUEUED/RETRYING -> RUNNING.
+
+    One conditional UPDATE, so exactly one caller can win. This is what makes it
+    safe for a job to have two messages in flight — which it now routinely can:
+    when a worker dies mid-job, RabbitMQ redelivers its unacked message, AND the
+    reaper publishes a fresh one. Two independent recovery paths for the same
+    failure would otherwise mean running the job twice (and, for a RETRYING job,
+    skipping its backoff and burning an extra attempt). Rather than coordinating
+    them, the loser's claim is simply a no-op — the same move as Phase 5's
+    idempotency constraint.
+    """
+    won = db.execute(
+        update(Job)
+        .where(Job.id == jid,
+               Job.status.in_([JobStatus.QUEUED.value, JobStatus.RETRYING.value]))
+        .values(status=JobStatus.RUNNING.value, started_at=started_at)
+        .returning(Job.id)
+    ).first()
+    db.commit()
+    return won is not None
+
+
+def _log_unclaimable(job: Job) -> None:
+    if job.status in (JobStatus.SUCCESS.value, JobStatus.DEAD.value):
+        # At-least-once delivery means this may be a redelivery of a job whose
+        # outcome was already committed.
+        logger.info("Job %s already %s — skipping duplicate delivery.", job.id, job.status)
+    elif job.status == JobStatus.RUNNING.value:
+        # Either another worker is running it right now, or its worker died and
+        # this is the broker's redelivery. Deciding which is the reaper's job:
+        # it alone moves RUNNING back to QUEUED, once the heartbeat is gone.
+        logger.info("Job %s is RUNNING elsewhere (or abandoned, pending the reaper) — "
+                    "skipping this delivery.", job.id)
+    else:
+        logger.info("Job %s is %s — not claimable, skipping.", job.id, job.status)
+
+
+def _beat_until_stopped(job_id: str, stop: threading.Event) -> None:
+    while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+        try:
+            send_heartbeat(WORKER_ID, job_id)
+        except Exception:  # noqa: BLE001 — a Redis blip must not kill the job
+            logger.warning("Heartbeat for job %s failed; will retry.", job_id, exc_info=True)
+
+
 def process_job(job_id: str) -> tuple[Disposition, int | None]:
     """Returns (disposition, retry_tier)."""
     db = SessionLocal()
     try:
-        job = db.get(Job, uuid.UUID(job_id))
-        if job is None:
-            logger.warning("Job %s not found — skipping (row may have been deleted).", job_id)
-            return Disposition.ACK, None
-
-        if job.status in (JobStatus.SUCCESS.value, JobStatus.DEAD.value):
-            # At-least-once delivery means this message may be a redelivery
-            # of a job whose outcome was already committed. Re-running the
-            # handler here would violate the idempotent-processing NFR.
-            logger.info("Job %s already %s — skipping duplicate delivery.", job_id, job.status)
-            return Disposition.ACK, None
-
-        attempt_number = job.attempt_count + 1
+        jid = uuid.UUID(job_id)
         started_at = datetime.now(timezone.utc)
-        job.status = JobStatus.RUNNING.value
-        job.started_at = started_at
-        db.commit()
 
-        handler = get_handler(job.type)
-        if handler is None:
-            # Permanent: this worker's registry is fixed for its lifetime, so
-            # attempts 2 and 3 would look up the same missing key and fail
-            # identically. Burning the ladder buys nothing. If the handler is
-            # merely undeployed, the job is recoverable from the DLQ once it
-            # ships — which is the same remedy, minus three wasted attempts.
-            return _fail(db, job, attempt_number, started_at,
-                         f"No handler registered for job type '{job.type}'.",
-                         permanent=True)
+        if not _claim(db, jid, started_at):
+            job = db.get(Job, jid)
+            if job is None:
+                logger.warning("Job %s not found — skipping (row may have been deleted).",
+                               job_id)
+            else:
+                _log_unclaimable(job)
+            return Disposition.ACK, None
 
-        context = JobContext(
-            job_id=job.id,
-            attempt_number=attempt_number,
-            storage_dir=settings.storage_dir,
-        )
+        # The job is ours and RUNNING. Heartbeat for as long as that stays true:
+        # the first beat goes out synchronously, and the thread is only stopped
+        # in the finally below — AFTER the terminal or RETRYING status has been
+        # committed. Stopping it earlier would open a window where the row says
+        # RUNNING with no heartbeat, which is exactly what the reaper looks for.
+        stop = threading.Event()
         try:
-            result = handler(job.payload, context)
-        except HandlerError as exc:
-            # The handler rejected its own input. The payload can't change,
-            # so a retry would fail identically — terminal immediately.
-            return _fail(db, job, attempt_number, started_at, str(exc), permanent=True)
-        except Exception as exc:  # noqa: BLE001 — deliberately broad: any
-            # handler failure must still leave the job in a consistent
-            # state rather than crashing the whole consume loop.
-            return _fail(db, job, attempt_number, started_at,
-                         f"{type(exc).__name__}: {exc}", permanent=False)
-
-        _record_attempt(db, job, attempt_number, started_at,
-                        JobStatus.SUCCESS.value, result=result)
-        job.status = JobStatus.SUCCESS.value
-        job.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.info("Job %s succeeded on attempt %d.", job_id, attempt_number)
-        return Disposition.ACK, None
+            send_heartbeat(WORKER_ID, job_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("Initial heartbeat for job %s failed.", job_id, exc_info=True)
+        beater = threading.Thread(target=_beat_until_stopped, args=(job_id, stop),
+                                  name=f"heartbeat-{job_id[:8]}", daemon=True)
+        beater.start()
+        try:
+            return _run_claimed(db, jid, started_at)
+        finally:
+            stop.set()
+            beater.join(timeout=2)
+            try:
+                clear_heartbeat(WORKER_ID, job_id)
+            except Exception:  # noqa: BLE001 — it expires on its own regardless
+                logger.warning("Could not clear heartbeat for job %s.", job_id, exc_info=True)
     finally:
         db.close()
+
+
+def _run_claimed(db, jid: uuid.UUID, started_at: datetime) -> tuple[Disposition, int | None]:
+    job = db.get(Job, jid)
+    job_id = str(jid)
+    # attempt_count only advances when an attempt is recorded, so an attempt that
+    # was abandoned mid-flight (worker killed, job reaped) never consumed any of
+    # the retry budget — it was never the job's fault.
+    attempt_number = job.attempt_count + 1
+
+    handler = get_handler(job.type)
+    if handler is None:
+        # Permanent: this worker's registry is fixed for its lifetime, so
+        # attempts 2 and 3 would look up the same missing key and fail
+        # identically. Burning the ladder buys nothing. If the handler is
+        # merely undeployed, the job is recoverable from the DLQ once it
+        # ships — which is the same remedy, minus three wasted attempts.
+        return _fail(db, job, attempt_number, started_at,
+                     f"No handler registered for job type '{job.type}'.",
+                     permanent=True)
+
+    context = JobContext(
+        job_id=job.id,
+        attempt_number=attempt_number,
+        storage_dir=settings.storage_dir,
+    )
+    try:
+        result = handler(job.payload, context)
+    except HandlerError as exc:
+        # The handler rejected its own input. The payload can't change,
+        # so a retry would fail identically — terminal immediately.
+        return _fail(db, job, attempt_number, started_at, str(exc), permanent=True)
+    except Exception as exc:  # noqa: BLE001 — deliberately broad: any
+        # handler failure must still leave the job in a consistent
+        # state rather than crashing the whole consume loop.
+        return _fail(db, job, attempt_number, started_at,
+                     f"{type(exc).__name__}: {exc}", permanent=False)
+
+    _record_attempt(db, job, attempt_number, started_at,
+                    JobStatus.SUCCESS.value, result=result)
+    job.status = JobStatus.SUCCESS.value
+    job.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    logger.info("Job %s succeeded on attempt %d.", job_id, attempt_number)
+    return Disposition.ACK, None
 
 
 def _fail(db, job: Job, attempt_number: int, started_at: datetime,

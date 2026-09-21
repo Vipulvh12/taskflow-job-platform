@@ -19,9 +19,10 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-**MVP complete (Phases 1–14).** The whole system runs from `docker compose up`,
-is covered by a 59-test suite against real infrastructure, and its indexes have
-been benchmarked with measured before/after numbers rather than assumed.
+**MVP complete (Phases 1–14), V2 in progress.** The whole system runs from
+`docker compose up`, is covered by a 74-test suite against real infrastructure,
+has benchmarked indexes, and recovers automatically from a worker dying mid-job
+(Phase 15).
 
 ## Running it
 
@@ -89,9 +90,11 @@ records the outcome as both a `jobs` status change and a `job_attempts` row.
   consume loop.
 
 No auto-reconnect: a consuming connection notices a dead broker immediately
-(heartbeat frames), so it surfaces as a crash rather than the silent stale
+(AMQP heartbeat frames), so it surfaces as a crash rather than the silent stale
 handle the API's idle connection suffers. Process restart is the right fix —
-`restart: unless-stopped` in Phase 13.
+`restart: unless-stopped` in Phase 13. Those AMQP heartbeats are a different
+mechanism from the per-job heartbeats below: they detect a dead *connection*,
+not an abandoned *job*.
 
 ### Job types
 
@@ -220,11 +223,70 @@ message for each retry rather than forwarding the original, so the broker's
 `x-death` headers only describe the last hop — `job_attempts` is the audit
 trail, not the message.
 
+### Crash recovery: heartbeats and the reaper
+
+A worker that dies mid-job is recovered automatically, in about 20 seconds.
+
+**Every job has exactly one owner at a time**, enforced by conditional `UPDATE`s
+rather than coordination:
+
+| Transition | Owner |
+|---|---|
+| `QUEUED`/`RETRYING` → `RUNNING` | a worker, via an atomic claim |
+| `RUNNING` → `SUCCESS`/`DEAD`/`RETRYING` | the worker that claimed it |
+| `RUNNING` → `QUEUED` | the reaper, only once the job's heartbeat has expired |
+
+The claim is what makes recovery safe. When a worker dies, RabbitMQ *already*
+redelivers its unacknowledged message — and the reaper then publishes a second
+one. Two independent recovery paths for one failure would otherwise run the job
+twice, and for a `RETRYING` job skip its backoff and burn an extra attempt.
+Instead, whichever message arrives while the job is still `RUNNING` is skipped,
+and only one claim can ever win.
+
+(An earlier version of this README said a job killed mid-run "sits RUNNING
+forever". That was never quite true — broker redelivery re-ran it once a worker
+came back. What heartbeats and the claim add is doing so without the risk of a
+second, concurrent execution.)
+
+- **Heartbeats** are `job_heartbeat:{job_id}` in Redis, 15s TTL, renewed every 5s
+  from a background thread, holding the owning worker's id. Keyed by *job* so
+  the reaper does one pipelined `EXISTS` per job — keying by worker would force
+  a trailing-wildcard `SCAN` across the whole keyspace for every running job.
+- **The reaper** (`python -m worker.reaper`, its own Compose service) scans every
+  10s for `RUNNING` jobs claimed more than one TTL ago with no heartbeat. It
+  leaves `attempt_count` alone: an attempt cut off by a crash was never the job's
+  fault and must not eat the retry budget.
+- **`started_at IS NOT NULL` defines "abandoned".** A worker's claim always sets
+  it, so a `RUNNING` row without one was never picked up by a worker and there is
+  no crashed run to recover. It also protects the ~33,000 seeded `RUNNING` rows
+  from Phase 14 — without it, the first scan would have requeued every one.
+
+Demonstrated end to end by killing a deliberately slowed worker mid-job:
+
+```
+t+ 0.0s  worker killed mid-job
+t+ 2.6s  restarted worker gets the broker's redelivery -> skips it (job still RUNNING)
+t+13.2s  heartbeat expires
+t+19.0s  reaper requeues it; worker claims and completes it
+         status=SUCCESS  attempt_count=1  attempt_rows=1
+```
+
 ### Known gaps
 
-- A worker killed mid-job leaves that job at `RUNNING` forever — nothing detects
-  an abandoned job until V2 heartbeats. Recover by hand:
-  `UPDATE jobs SET status='QUEUED' WHERE id='...'` and republish, or resubmit.
+- **Heartbeats prove the process is alive, not that the job is progressing.** A
+  handler stuck forever keeps its heartbeat thread beating and is never reaped.
+  Catching that needs a per-job execution timeout.
+- **RabbitMQ's data is in an anonymous volume.** The Compose file names no volume
+  for it, so the image's own `VOLUME` creates an unnamed one — and a recreated
+  container gets a new, empty one. Durable queues and persistent messages survive
+  a broker *restart*, but `docker compose down` then `up` discards every queued
+  message, including the dead-letter queue. A `QUEUED` job whose message is lost
+  that way is stranded, since the reaper only rescues `RUNNING` jobs. Fix: a
+  named volume on the `rabbitmq` service.
+- Each reaper scan currently reads ~3,100 pages (29 ms), because it must check
+  `started_at` on the ~33,000 seeded `RUNNING` rows. With real traffic the number
+  of `RUNNING` jobs is roughly the number of workers, so this is an artifact of
+  the seed data rather than a production cost.
 - If the worker cannot publish the retry message, it requeues instead of acking.
   The job gets re-attempted, costing one extra attempt — acceptable under
   at-least-once, and better than a job stranded at `RETRYING` with no message

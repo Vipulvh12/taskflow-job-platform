@@ -101,6 +101,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  reaper:
+    # Same image as the worker — identical dependencies, different entrypoint.
+    # It must be a separate process: a crashed worker cannot detect its own
+    # crash. Safe to scale, since its requeue is a conditional UPDATE that only
+    # one reaper can win.
+    build:
+      context: ./backend
+      target: worker
+    command: ["python", "-m", "worker.reaper"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   job_storage:
