@@ -223,6 +223,26 @@ message for each retry rather than forwarding the original, so the broker's
 `x-death` headers only describe the last hop — `job_attempts` is the audit
 trail, not the message.
 
+### Broker durability across `docker compose down`
+
+Queued and dead-lettered messages survive the containers being recreated, not
+just restarted. That took two things, and the first alone was not enough:
+
+1. **A named volume** (`rabbitmq_data`) on `/var/lib/rabbitmq`. Without it the
+   image's own `VOLUME` makes an anonymous one, and a recreated container gets a
+   new, empty anonymous volume.
+2. **A fixed `hostname: rabbitmq`.** RabbitMQ names its node `rabbit@<hostname>`
+   and keeps data under `mnesia/rabbit@<hostname>`; a container's hostname
+   defaults to its container ID, which changes on every recreate. With the volume
+   but no fixed hostname, the new container booted as a *new node* and started an
+   empty broker right beside the old node's data — which was still on the volume,
+   just never read. The first attempt at this fix failed exactly that way, and
+   stranded a queued job.
+
+Persistence is also a property of each **message**, not just the queue: a durable
+queue loses a transient message on restart. Every publish in the app sets
+`delivery_mode=2`, and dead-lettering keeps it, so dead-lettered jobs persist too.
+
 ### Crash recovery: heartbeats and the reaper
 
 A worker that dies mid-job is recovered automatically, in about 20 seconds.
@@ -276,13 +296,10 @@ t+19.0s  reaper requeues it; worker claims and completes it
 - **Heartbeats prove the process is alive, not that the job is progressing.** A
   handler stuck forever keeps its heartbeat thread beating and is never reaped.
   Catching that needs a per-job execution timeout.
-- **RabbitMQ's data is in an anonymous volume.** The Compose file names no volume
-  for it, so the image's own `VOLUME` creates an unnamed one — and a recreated
-  container gets a new, empty one. Durable queues and persistent messages survive
-  a broker *restart*, but `docker compose down` then `up` discards every queued
-  message, including the dead-letter queue. A `QUEUED` job whose message is lost
-  that way is stranded, since the reaper only rescues `RUNNING` jobs. Fix: a
-  named volume on the `rabbitmq` service.
+- Scaling the reaper is safe, but its healthcheck only *reports*: Compose marks
+  a reaper that stops completing scans `unhealthy` (verified — within ~50s of
+  its scans starting to fail) and does not restart it. Acting on that needs an
+  orchestrator or an autoheal sidecar.
 - Each reaper scan currently reads ~3,100 pages (29 ms), because it must check
   `started_at` on the ~33,000 seeded `RUNNING` rows. With real traffic the number
   of `RUNNING` jobs is roughly the number of workers, so this is an artifact of

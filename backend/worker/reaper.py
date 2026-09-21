@@ -22,6 +22,7 @@ per-job execution timeout, which is separate work.
 """
 
 import logging
+import socket
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from app.core.enums import JobStatus
 from app.db import SessionLocal
 from app.models.job import Job
 from app.rabbitmq_client import publish_job
+from app.redis_client import redis_client
 from worker.heartbeat import HEARTBEAT_TTL_SECONDS, live_heartbeats
 
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +115,12 @@ def reap_once(db, publish=publish_job, now: datetime | None = None) -> list[str]
     return reaped
 
 
+def liveness_key() -> str:
+    # Per container, so each reaper's healthcheck reports on itself rather than
+    # passing because some OTHER reaper is still scanning.
+    return f"reaper:last_scan:{socket.gethostname()}"
+
+
 def main() -> None:
     logger.info("Reaper started. Scanning every %ds; eligible after %ds without a heartbeat.",
                 SCAN_INTERVAL_SECONDS, REAP_GRACE_SECONDS)
@@ -122,6 +130,12 @@ def main() -> None:
             reaped = reap_once(db)
             if reaped:
                 logger.info("Reaped %d abandoned job(s).", len(reaped))
+            # Written only after a SUCCESSFUL scan, with a TTL of a few scan
+            # intervals. `restart: unless-stopped` covers a reaper that exits; it
+            # does nothing for one that is still running but hung or failing
+            # every scan — crash recovery would silently stop. The Compose
+            # healthcheck reads this key, so that state shows up as `unhealthy`.
+            redis_client.setex(liveness_key(), SCAN_INTERVAL_SECONDS * 3, str(time.time()))
         except Exception:  # noqa: BLE001 — one bad scan must not end the loop
             logger.exception("Reaper scan failed — will retry next interval.")
         finally:

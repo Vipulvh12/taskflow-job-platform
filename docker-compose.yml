@@ -31,9 +31,25 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    # Required for the volume below to mean anything. RabbitMQ names its node
+    # rabbit@<hostname> and keeps its data under mnesia/rabbit@<hostname>. A
+    # container's hostname defaults to its container ID, which changes on every
+    # recreate — so without this, each new container boots as a NEW node and
+    # starts an empty broker next to the old node's data, still on the volume
+    # but never read. Verified: the volume held both rabbit@35a1d3d3a415 (with
+    # the messages) and rabbit@20405d1f4820 (empty, the one running).
+    hostname: rabbitmq
     ports:
       - "5672:5672"   # AMQP protocol port
       - "15672:15672" # management UI (http://localhost:15672, guest/guest)
+    volumes:
+      # Named, not left to the image's own VOLUME. The image declares
+      # /var/lib/rabbitmq as a volume, so without this Docker creates an
+      # anonymous one — and a recreated container gets a new, empty anonymous
+      # volume. Durable queues and persistent messages then survive a restart
+      # but not `docker compose down` + `up`, which discards every queued
+      # message. A QUEUED job whose message is lost that way is stranded.
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       # NOT `ping`. ping reports success as soon as the Erlang node is up, which
       # happens ~50s before the AMQP listener accepts connections on this
@@ -118,8 +134,19 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      # Healthy only while this reaper keeps completing scans. The restart
+      # policy catches a reaper that exits; this catches one that is running
+      # but hung or failing every scan, which would otherwise stop crash
+      # recovery with nothing to show for it.
+      test: ["CMD", "python", "-c", "import socket, sys; from app.redis_client import redis_client as r; sys.exit(0 if r.exists('reaper:last_scan:' + socket.gethostname()) else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 2
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   postgres_data:
   job_storage:
+  rabbitmq_data:
