@@ -8,7 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.core.exceptions import AppError, RateLimitError
-from app.routers import auth, health, jobs
+from app.routers import admin, auth, health, jobs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taskflow")
@@ -34,6 +34,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(jobs.router)
+app.include_router(admin.router)
 
 
 @app.exception_handler(AppError)

@@ -1,6 +1,8 @@
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
+import { AdminRoute } from "./auth/AdminRoute";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AdminDeadJobs } from "./pages/AdminDeadJobs";
 import { JobDetail } from "./pages/JobDetail";
 import { JobList } from "./pages/JobList";
 import { Login } from "./pages/Login";
@@ -15,6 +17,8 @@ function Shell({ children }) {
         <Link to="/jobs" className="brand">
           TaskFlow
         </Link>
+        {/* Shown to admins only; the API enforces access either way. */}
+        {user.is_admin && <Link to="/admin/dead">Dead jobs</Link>}
         <span className="spacer" />
         <span className="muted">
           {user.email}
@@ -69,6 +73,16 @@ export default function App() {
               <Protected>
                 <JobList />
               </Protected>
+            }
+          />
+          <Route
+            path="/admin/dead"
+            element={
+              <AdminRoute>
+                <Shell>
+                  <AdminDeadJobs />
+                </Shell>
+              </AdminRoute>
             }
           />
           <Route path="*" element={<Navigate to="/jobs" replace />} />

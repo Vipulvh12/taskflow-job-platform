@@ -91,6 +91,9 @@ class JobResponse(BaseModel):
     result: Any | None
     idempotency_key: str | None
     attempt_count: int
+    # Attempts spent before the last admin retry; 0 if never retried. Lets the
+    # detail view mark where the fresh budget began in the attempt history.
+    attempt_base: int = 0
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

@@ -20,9 +20,9 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 ## Status
 
 **MVP complete (Phases 1–14), V2 in progress.** The whole system runs from
-`docker compose up`, is covered by a 74-test suite against real infrastructure,
-has benchmarked indexes, and recovers automatically from a worker dying mid-job
-(Phase 15).
+`docker compose up`, is covered by an 89-test suite against real infrastructure,
+has benchmarked indexes, recovers automatically from a worker dying mid-job
+(Phase 15), and gives admins a dead-letter view with manual retry (Phase 16).
 
 ## Running it
 
@@ -775,3 +775,67 @@ DELETE FROM jobs WHERE user_id IN
     (SELECT id FROM users WHERE email LIKE 'bench-%@taskflow.local');
 DELETE FROM users WHERE email LIKE 'bench-%@taskflow.local';
 ```
+
+## Admin: dead jobs and manual retry
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/jobs/dead` | `DEAD` jobs across all users, highest priority first, then oldest, with each job's final error |
+| `POST /admin/jobs/{id}/retry` | Put a `DEAD` job back in the queue with a fresh retry budget |
+
+Both require `require_admin`, which reads `is_admin` from the database. Admin is
+never grantable through the API — only with
+`UPDATE users SET is_admin = true WHERE email = '...'`. The frontend's
+`/admin/dead` page (linked in the nav for admins only) is presentation; the API
+returns `403` to a non-admin regardless.
+
+The view reads `DEAD` rows from **Postgres**, not the `jobs.dlq` queue. Each row
+carries `last_error` because the whole decision is *whether* a retry can help: a
+job that died on a malformed payload will die again identically.
+
+### A retry is a fresh budget, not a renumbering
+
+A `DEAD` job has spent its budget legitimately, so an admin retry grants a new
+one — deliberately unlike the reaper, which rescues an attempt cut off through no
+fault of the job and so charges nothing.
+
+The budget is reset by raising **`attempt_base`** to the attempts already spent,
+**not** by zeroing `attempt_count`. `job_attempts` has no uniqueness on
+`(job_id, attempt_number)`, so zeroing would number the next attempt `1` again
+and turn the history into `1, 2, 3, 1, 2, 3`. The worker measures its ladder as
+`attempt_number - attempt_base`, so `attempt_count` and the numbering keep
+counting. Verified live: a transiently failing job, retried after dying, ran
+attempts **4, 5, 6** with the usual 5s/25s backoff and went back to `DEAD`, its
+history reading `[1, 2, 3, 4, 5, 6]`. The job detail page marks where the fresh
+budget began.
+
+### One requeue path
+
+The reaper (`RUNNING → QUEUED`) and admin retry (`DEAD → QUEUED`) share
+`requeue()` in [job_transitions.py](backend/app/services/job_transitions.py): a
+conditional transition, a publish, and — if the publish fails — restoring the row
+*exactly* as it was. For admin retry that means the job stays `DEAD` with its
+original budget and completion time, still visible and retryable; marking it
+`FAILED` would hide it from this view and claim a job that ran three times never
+ran. Two simultaneous retries of one job produce exactly one `200` and one `409`,
+and one publish.
+
+### The index, and why it isn't the Phase 14 number
+
+The dead list is the first real query to use `idx_jobs_status_priority`
+(`Index Scan Backward`). It is **not** the 446× shape Phase 14 measured: that
+query ordered by `priority` alone, so Postgres stopped after 50 index entries.
+This one also orders by `created_at, id`, which the index does not hold, so
+Postgres reads the whole top-priority group (3,088 rows here) and runs an
+*Incremental Sort* — ~10 ms for a page, plus ~21 ms for the `count(*)` over 33,522
+`DEAD` rows. An index on `(status, priority DESC, created_at, id)` would remove
+the sort, but unlike 14b this is an occasionally opened admin page, not a query
+polled every 2 seconds, so it was measured and left alone.
+
+### Known gap
+
+`jobs.dlq` now only grows. Nothing consumes it, RabbitMQ cannot delete one
+specific message, and since Phase 15b it survives recreation — so every
+dead-lettered message is kept forever, including for jobs later retried. The
+view is unaffected (it reads Postgres), but the queue wants an `x-max-length` or
+message TTL, which, being a queue argument, means redeclaring it.

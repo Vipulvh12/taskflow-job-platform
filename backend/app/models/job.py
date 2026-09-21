@@ -36,6 +36,12 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # attempt_count at the last manual retry. The retry budget is measured from
+    # here, so attempt_count can keep counting and the history stays numbered
+    # 1..n instead of restarting at 1. See migration 21be72814031.
+    attempt_base: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

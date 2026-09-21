@@ -182,7 +182,12 @@ def _fail(db, job: Job, attempt_number: int, started_at: datetime,
     # try. The JOB's status says what happens next: RETRYING, or terminal.
     _record_attempt(db, job, attempt_number, started_at, JobStatus.FAILED.value, error=error)
 
-    retries_left = attempt_number < settings.job_max_attempts
+    # The budget is measured from attempt_base, not from zero. It is 0 until an
+    # admin retries a DEAD job, at which point it is set to the attempts already
+    # spent — so the retried job gets a full fresh ladder while attempt_count,
+    # and the numbering in job_attempts, keep counting instead of restarting.
+    budget_used = attempt_number - job.attempt_base
+    retries_left = budget_used < settings.job_max_attempts
     if permanent:
         # DEAD, not FAILED. FAILED is reserved for a job that never ran at
         # all — the Phase 6 case where the row committed but the publish
@@ -203,12 +208,12 @@ def _fail(db, job: Job, attempt_number: int, started_at: datetime,
                      job.id, attempt_number, error)
         return Disposition.DEAD_LETTER, None
 
-    tier = settings.tier_for_attempt(attempt_number)
+    tier = settings.tier_for_attempt(budget_used)
     job.status = JobStatus.RETRYING.value
     job.completed_at = None  # not finished; only terminal states get this
     db.commit()
     logger.warning("Job %s failed on attempt %d, retrying via tier %d (~%ds): %s",
-                   job.id, attempt_number, tier, settings.delay_for_attempt(attempt_number),
+                   job.id, attempt_number, tier, settings.delay_for_attempt(budget_used),
                    error)
     return Disposition.RETRY, tier
 

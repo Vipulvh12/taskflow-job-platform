@@ -18,7 +18,8 @@ from app.redis_client import redis_client
 from worker.handlers.registry import register
 from worker.heartbeat import heartbeat_key, send_heartbeat
 from worker.main import WORKER_ID, Disposition, process_job
-from worker.reaper import REAP_GRACE_SECONDS, _set_status, reap_once
+from app.services.job_transitions import RequeueOutcome, requeue
+from worker.reaper import REAP_GRACE_SECONDS, reap_once
 
 GOOD_CSV = {"csv_text": "a,b\n1,2\n"}
 
@@ -218,8 +219,13 @@ def test_failed_publish_puts_the_job_back_for_the_next_scan(db):
 
 
 def test_requeue_is_conditional_on_still_being_running(db):
+    """A job that finished between the reaper's SELECT and its UPDATE must be
+    left alone — and nothing published for it."""
     job = _job(db, status=JobStatus.SUCCESS.value)
-    assert _set_status(db, job.id, "RUNNING", "QUEUED") is False
+    publish = Recorder()
+    outcome = requeue(db, job.id, expected_status="RUNNING", publish=publish)
+    assert outcome is RequeueOutcome.NOT_IN_EXPECTED_STATE
+    assert publish.calls == []
     db.refresh(job)
     assert job.status == "SUCCESS"
 

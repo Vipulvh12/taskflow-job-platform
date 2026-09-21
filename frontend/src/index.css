@@ -194,3 +194,11 @@ pre {
 .error-cell { color: #8a1c1c; font-size: 0.82rem; }
 
 .pager { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
+
+.topbar a { color: #2f6feb; font-weight: 600; text-decoration: none; }
+.divider-row td {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #78350f;
+  background: #fef3c7;
+}

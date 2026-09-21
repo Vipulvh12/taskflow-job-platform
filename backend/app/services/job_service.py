@@ -2,15 +2,18 @@ import uuid
 from typing import Any
 
 from pika.exceptions import AMQPError
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.enums import JobStatus, JobType
 from app.core.exceptions import ConflictError, NotFoundError, QueuePublishError
 from app.models.job import Job
+from app.models.job_attempt import JobAttempt
 from app.models.user import User
 from app.rabbitmq_client import publish_job
 from app.redis_client import redis_client
+from app.services.job_transitions import RequeueOutcome, requeue
 
 IDEMPOTENCY_KEY_PREFIX = "idempotency:"
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
@@ -163,3 +166,92 @@ def list_jobs(
         .all()
     )
     return items, total
+
+
+# ------------------------------------------------------------------ admin ---
+
+
+def list_dead_jobs(db: Session, page: int, page_size: int) -> tuple[list[dict], int]:
+    """DEAD jobs across all users, highest priority first, then oldest.
+
+    WHERE status + ORDER BY priority is the shape idx_jobs_status_priority was
+    built for — the first query in the codebase that actually uses it.
+
+    `id` is a tiebreaker: priority and created_at can both tie, and without a
+    total order offset pagination can repeat a row or skip one across pages.
+    """
+    query = db.query(Job).filter(Job.status == JobStatus.DEAD.value)
+    total = query.count()
+    jobs = (
+        query.order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    # The final attempt's error for each job on the page, in one query rather
+    # than one per row: DISTINCT ON keeps the highest attempt_number per job.
+    last_errors = {}
+    if jobs:
+        last_errors = dict(
+            db.execute(
+                select(JobAttempt.job_id, JobAttempt.error)
+                .where(JobAttempt.job_id.in_([j.id for j in jobs]))
+                .distinct(JobAttempt.job_id)
+                .order_by(JobAttempt.job_id, JobAttempt.attempt_number.desc())
+            ).all()
+        )
+
+    items = [
+        {
+            "id": j.id, "user_id": j.user_id, "type": j.type, "priority": j.priority,
+            "attempt_count": j.attempt_count, "created_at": j.created_at,
+            "completed_at": j.completed_at, "last_error": last_errors.get(j.id),
+        }
+        for j in jobs
+    ]
+    return items, total
+
+
+def admin_retry_job(db: Session, job_id: uuid.UUID) -> Job:
+    """Give a DEAD job a fresh retry budget and put it back in the queue.
+
+    Unlike the reaper's requeue, this DOES change the budget — deliberately. The
+    reaper rescues an attempt that was cut off through no fault of the job, so
+    it must not cost anything. A DEAD job spent its whole budget legitimately;
+    an admin retrying it is a new decision to give it another one.
+
+    The budget is reset by moving attempt_base up to the attempts already spent,
+    not by zeroing attempt_count: zeroing would renumber the next attempt as 1
+    and turn the history into 1, 2, 3, 1, 2, 3.
+
+    Goes through the same requeue() the reaper uses. If the publish fails the
+    job is restored to exactly the DEAD state it was in — still visible in this
+    view and retryable again — rather than marked FAILED, which would both hide
+    it from the admin and claim that a job which ran three times never ran.
+    """
+    job = db.get(Job, job_id)
+    if job is None:
+        raise NotFoundError(f"Job {job_id} not found.")
+    if job.status != JobStatus.DEAD.value:
+        raise ConflictError(f"Job is {job.status}, not DEAD — only dead jobs can be retried.")
+
+    outcome = requeue(
+        db,
+        job_id,
+        expected_status=JobStatus.DEAD.value,
+        set_values={"attempt_base": job.attempt_count, "started_at": None, "completed_at": None},
+        restore_values={"attempt_base": job.attempt_base, "started_at": job.started_at,
+                        "completed_at": job.completed_at},
+    )
+    if outcome is RequeueOutcome.NOT_IN_EXPECTED_STATE:
+        # Lost a race: something else moved the job between the check above and
+        # the conditional UPDATE — typically a second admin retrying it too.
+        raise ConflictError("Job state changed before the retry could be applied.")
+    if outcome is RequeueOutcome.PUBLISH_FAILED:
+        raise QueuePublishError(
+            "Job could not be queued. It has been left DEAD — try the retry again."
+        )
+
+    db.refresh(job)
+    return job

@@ -27,13 +27,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.core.enums import JobStatus
 from app.db import SessionLocal
 from app.models.job import Job
-from app.rabbitmq_client import publish_job
 from app.redis_client import redis_client
+from app.services.job_transitions import RequeueOutcome, requeue
 from worker.heartbeat import HEARTBEAT_TTL_SECONDS, live_heartbeats
 
 logging.basicConfig(level=logging.INFO)
@@ -48,18 +48,7 @@ SCAN_INTERVAL_SECONDS = 10
 REAP_GRACE_SECONDS = HEARTBEAT_TTL_SECONDS
 
 
-def _set_status(db, jid: uuid.UUID, expected: str, new: str) -> bool:
-    row = db.execute(
-        update(Job)
-        .where(Job.id == jid, Job.status == expected)
-        .values(status=new)
-        .returning(Job.id)
-    ).first()
-    db.commit()
-    return row is not None
-
-
-def reap_once(db, publish=publish_job, now: datetime | None = None) -> list[str]:
+def reap_once(db, publish=None, now: datetime | None = None) -> list[str]:
     """One scan. Returns the ids of the jobs it requeued."""
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(seconds=REAP_GRACE_SECONDS)
@@ -90,21 +79,13 @@ def reap_once(db, publish=publish_job, now: datetime | None = None) -> list[str]
     for job_id in candidates:
         if alive[job_id]:
             continue
-        jid = uuid.UUID(job_id)
-
-        # Conditional: if the job finished between the SELECT above and now,
-        # this matches nothing and we leave it alone.
-        if not _set_status(db, jid, JobStatus.RUNNING.value, JobStatus.QUEUED.value):
-            continue
-
-        try:
-            publish(job_id)
-        except Exception:  # noqa: BLE001
-            # Phase 6's dual-write problem again. A QUEUED row with no message
-            # would be stuck for good — nothing consumes a status, and this scan
-            # only looks at RUNNING. Put it back so the next scan retries it.
-            _set_status(db, jid, JobStatus.QUEUED.value, JobStatus.RUNNING.value)
-            logger.exception("Job %s: requeue publish failed; will retry next scan.", job_id)
+        # The same requeue an admin retry uses: conditional RUNNING -> QUEUED
+        # (a job that finished since the SELECT above is left alone), then a
+        # publish, reverted to RUNNING if it fails so the next scan retries it
+        # instead of stranding it at QUEUED with no message.
+        outcome = requeue(db, uuid.UUID(job_id),
+                          expected_status=JobStatus.RUNNING.value, publish=publish)
+        if outcome is not RequeueOutcome.REQUEUED:
             continue
 
         # attempt_count is deliberately not touched. The abandoned attempt never

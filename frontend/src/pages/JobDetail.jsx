@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { getJob } from "../api/jobs";
@@ -97,7 +97,15 @@ export function JobDetail() {
           </thead>
           <tbody>
             {attempts.map((a) => (
-              <tr key={a.id ?? a.attempt_number}>
+              <Fragment key={a.id ?? a.attempt_number}>
+                {job.attempt_base > 0 && a.attempt_number === job.attempt_base + 1 && (
+                  <tr className="divider-row">
+                    <td colSpan={5}>
+                      Retried by an admin — a fresh budget of attempts starts here
+                    </td>
+                  </tr>
+                )}
+              <tr>
                 <td>{a.attempt_number}</td>
                 <td>
                   <StatusBadge status={a.status} />
@@ -106,6 +114,7 @@ export function JobDetail() {
                 <td>{fmt(a.completed_at)}</td>
                 <td className="error-cell">{a.error ?? "—"}</td>
               </tr>
+              </Fragment>
             ))}
           </tbody>
         </table>
