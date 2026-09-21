@@ -44,3 +44,15 @@ class Job(Base):
 
     user: Mapped["User"] = relationship(back_populates="jobs")
     attempts: Mapped[list["JobAttempt"]] = relationship(back_populates="job")
+
+
+# Declared here rather than in __table_args__ because the DESC ordering needs the
+# column objects. It must exist on the model as well as in migration 252ae359c5a3:
+# otherwise `alembic check` reports it as drift, and the test database — built
+# from these models with create_all — would silently lack it.
+Index(
+    "idx_jobs_user_created",
+    Job.user_id,
+    Job.created_at.desc(),
+    Job.id.desc(),
+)

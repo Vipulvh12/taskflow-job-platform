@@ -162,6 +162,21 @@ Every index is also maintained on every `INSERT` and every status change the wor
 3. **Stop selecting `payload` and `result` for list rows.** The list endpoint fetches both JSONB columns and `JobSummary` then discards them. With the tiny seeded payloads that cost does not show here; with real payloads up to 64 KB it means reading TOAST storage for data that is thrown away. `load_only(...)` on the list query fixes it.
 4. **Treat `uq_jobs_user_idempotency_key` as a user_id index too.** Any future index decision on `jobs` should account for it — it silently served every `user_id` lookup in this benchmark.
 
+## Phase 14b — the index, migrated
+
+Recommendation 1 applied as migration `252ae359c5a3`: `idx_jobs_user_created` on `(user_id, created_at DESC, id DESC)`, also declared on the model so `alembic check` stays clean and the test database gets it. The API container applied it itself on startup. Re-measured:
+
+| User | Query | Phase 2 indexes only | Migrated | Speedup | Pages | Plan |
+|---|---|---|---|---|---|---|
+| heavy | `list_default` | 9.05 ms | **0.061 ms** | 148× | 2,980 → 23 | Limit > Index Scan [idx_jobs_user_created] |
+| heavy | `list_filtered` | 2.43 ms | **0.156 ms** | 16× | 1,313 → 119 | Limit > Index Scan [idx_jobs_user_created] |
+| heavy | `count_filtered` | 0.481 ms | **0.363 ms** | ≈ same | 5 → 5 | Aggregate > Index Only Scan [idx_jobs_user_status] |
+| light | `list_default` | 0.255 ms | **0.043 ms** | 6× | 14 → 16 | Limit > Index Scan [idx_jobs_user_created] |
+| light | `list_filtered` | 0.258 ms | **0.207 ms** | ≈ same | 13 → 13 | Limit > Sort > Bitmap Heap Scan > Bitmap Index Scan [idx_jobs_user_status] |
+| light | `count_filtered` | 0.114 ms | **0.103 ms** | ≈ same | 4 → 4 | Aggregate > Index Only Scan [idx_jobs_user_status] |
+
+The migrated index matches the experiment within run-to-run noise. The count is still served by `idx_jobs_user_status` as an index-only scan, which is now that index's remaining job — both list queries have moved to the new one.
+
 ## Reproducing
 
 ```bash

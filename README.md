@@ -673,9 +673,9 @@ Three findings the headline numbers hide:
 - **The most frequently run query gets nothing from either Phase 2 index.** The
   default job list — polled every 2s — runs an identical plan with or without
   them, because its cost is in `ORDER BY created_at DESC`, not the `WHERE`. A
-  candidate `(user_id, created_at DESC, id DESC)` index took it from **9.05 ms to
-  0.050 ms (181×)**. Measured and dropped, not added: that is a schema change for
-  its own migration.
+  `(user_id, created_at DESC, id DESC)` index took it from **9.05 ms to 0.061 ms
+  (148×)**, reading 23 pages instead of 2,980. Added in Phase 14b as migration
+  `252ae359c5a3`, which the API container applies itself on startup.
 - **The biggest win serves a query nothing runs yet.** `idx_jobs_status_priority`
   is the 446× result, but RabbitMQ orders the worker's jobs, not Postgres. It
   earns its keep once an admin view or scheduler asks for the next queued job.

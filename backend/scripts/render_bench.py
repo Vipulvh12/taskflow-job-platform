@@ -224,6 +224,27 @@ w("4. **Treat `uq_jobs_user_idempotency_key` as a user_id index too.** Any futur
   "decision on `jobs` should account for it — it silently served every `user_id` lookup in "
   "this benchmark.\n")
 
+# ---------------------------------------------------------------------------
+if (RAW / "B4_migrated_user_created.json").exists():
+    B4 = load("B4_migrated_user_created")
+    w("## Phase 14b — the index, migrated\n")
+    w("Recommendation 1 applied as migration `252ae359c5a3`: `idx_jobs_user_created` on "
+      "`(user_id, created_at DESC, id DESC)`, also declared on the model so `alembic check` "
+      "stays clean and the test database gets it. The API container applied it itself on "
+      "startup. Re-measured:\n")
+    w("| User | Query | Phase 2 indexes only | Migrated | Speedup | Pages | Plan |")
+    w("|---|---|---|---|---|---|---|")
+    for heavy, who in ((True, "heavy"), (False, "light")):
+        for q in ("list_default", "list_filtered", "count_filtered"):
+            c, m = pick(B2, q, heavy), pick(B4, q, heavy)
+            w(f"| {who} | `{q}` | {ms(c['warm_median_ms'])} | **{ms(m['warm_median_ms'])}** | "
+              f"{x(c['warm_median_ms'], m['warm_median_ms'])} | {c['shared_hit']:,} → "
+              f"{m['shared_hit']:,} | {m['plan']} |")
+    w("")
+    w("The migrated index matches the experiment within run-to-run noise. The count is "
+      "still served by `idx_jobs_user_status` as an index-only scan, which is now that "
+      "index's remaining job — both list queries have moved to the new one.\n")
+
 w("## Reproducing\n")
 w("```bash")
 w("# from backend/, with the Compose stack up")
