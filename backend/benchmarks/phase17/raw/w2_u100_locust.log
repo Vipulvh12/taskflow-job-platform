@@ -1,0 +1,6 @@
+[2026-09-21 21:55:59,898] vipul/INFO/locust.main: Starting Locust 2.46.6
+[2026-09-21 21:55:59,905] vipul/INFO/locust.main: Run time limit set to 120 seconds
+[2026-09-21 21:56:00,038] vipul/INFO/locust.runners: Ramping to 100 users at a rate of 10.00 per second
+[2026-09-21 21:56:09,134] vipul/INFO/locust.runners: All users spawned: {"JobPlatformUser": 100} (100 total users)
+[2026-09-21 21:57:57,019] vipul/INFO/locust.main: --run-time limit reached, shutting down
+[2026-09-21 21:57:57,992] vipul/INFO/locust.main: Shutting down (exit code 0)

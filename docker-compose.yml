@@ -74,6 +74,12 @@ services:
       # is mounted, so the default would write generated files to a path that
       # disappears on restart.
       STORAGE_DIR: /app/storage
+      # Uvicorn processes (uvicorn reads this as its --workers default). One
+      # Python process saturates at ~77 req/s on the GIL (Phase 17). Each
+      # process has its own 15-connection pool and its own in-flight cap of 15,
+      # so the budget is 15 × this against Postgres's max_connections of 100,
+      # shared with the worker and reaper.
+      WEB_CONCURRENCY: "2"
     ports:
       - "8000:8000"
     volumes:

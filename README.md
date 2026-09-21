@@ -895,10 +895,24 @@ pool timeouts and a 61 s request; with the cap it passes in ~3 s.
 At 1,000 users the API runs at 144% CPU (one core of Python plus the work that
 runs outside the GIL), while Postgres has a median of **0** connections running a
 query. The 10 s p50 is queueing, not slow queries: 1,000 users ÷ (10 s + 2 s
-think time) ≈ 83 req/s against 77 measured. Four Uvicorn processes raised
-throughput **2.1×**, to 161 req/s, confirming the single process is the limit.
-It didn't reach 4× because the laptop's 6 cores are shared with Postgres and
-Locust.
+think time) ≈ 83 req/s against 77 measured. More Uvicorn processes confirmed the
+single process is the limit, sublinearly because the laptop's 6 cores are
+shared with Postgres and Locust:
+
+| Uvicorn processes | req/s at 1,000 users | p50 | Failed |
+|---|---|---|---|
+| 1 | 77 | 10 s | 0 |
+| **2 (the default now)** | **112** | **6.4 s** | 0 |
+| 4 (experiment) | 161 | 3.6 s | 0 |
+
+The API now runs **two processes** (`WEB_CONCURRENCY: "2"` in `docker-compose.yml`).
+That's 30 of Postgres's 100 connections: each process has its own pool of 15 and
+its own in-flight cap of 15, so the deadlock fix holds per process. Verified
+live, since the pytest regression test runs in-process and can't see two
+processes: 60, 100 and 200 simultaneous requests all returned 200, and
+connections peaked at 32 under 1,000 users. At 10 and 100 users the medians are
+unchanged (p50 18 ms and 24 ms), because the load there is set by the simulated
+users, not by server capacity.
 
 A py-spy profile of the saturated API puts 41% of GIL time in SQLAlchemy's
 per-statement machinery and ~29% in FastAPI and anyio's threadpool dispatch, but
@@ -933,7 +947,10 @@ a special-use domain, which `EmailStr` rejects. **Login latency is not measured.
   would need a liveness endpoint that bypasses the cap and the database.
 - **No load shedding.** Waiting requests queue without bound. A limit answered
   with `503` is the next step for sustained overload.
-- **One unexplained stall.** At 10 users the server paused once for ~1.9 s, seen
-  by both Locust and the independent `/health` probe. A Postgres checkpoint
-  overlapped it, but a forced checkpoint of similar size caused no stall, so the
-  cause is unknown.
+- **Unexplained server stalls.** Below saturation the server occasionally pauses
+  for 1–2.4 s. Locust and the independent `/health` probe both see these pauses,
+  in 3 of the 4 unsaturated runs after the fix. They set the p99 at 10 and 100
+  users: 2.2 s in the 2-process 100-user run, against 340 ms in the 1-process
+  one, which comes down to one pause more or less, not the process count. A
+  Postgres checkpoint is ruled out. Memory pressure looks unlikely, but the I/O
+  stall counter moved, which is a lead.

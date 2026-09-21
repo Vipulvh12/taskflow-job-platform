@@ -20,6 +20,10 @@ COPY alembic/ ./alembic/
 # --host 0.0.0.0 is required, not stylistic: uvicorn's default 127.0.0.1 only
 # accepts connections from inside the container's own network namespace, so the
 # published port would reach nothing.
+#
+# `exec` makes uvicorn PID 1. Without it `sh` stays PID 1, never passes on
+# docker stop's SIGTERM, and uvicorn is SIGKILLed (exit 137) with no graceful
+# shutdown — measured. The process count comes from WEB_CONCURRENCY (Compose).
 CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
 

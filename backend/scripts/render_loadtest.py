@@ -28,6 +28,9 @@ RUNS = {
     "u100": (100, 10, 120, "after fix"),
     "u1000": (1000, 50, 180, "after fix"),
     "exp_workers4_u1000": (1000, 50, 180, "after fix, 4 Uvicorn processes (experiment)"),
+    "w2_u10": (10, 2, 120, "after fix, 2 processes (the default since)"),
+    "w2_u100": (100, 10, 120, "after fix, 2 processes (the default since)"),
+    "w2_u1000": (1000, 50, 180, "after fix, 2 processes (the default since)"),
 }
 ENDPOINTS = ["/jobs [list]", "/jobs [filtered]", "/jobs/{id}", "/jobs [submit]"]
 
@@ -155,7 +158,7 @@ def svg_line_chart(path, title, series, y_label, x_label="seconds since the run 
         color = PALETTE[i % len(PALETTE)]
         d = " ".join(f"{sx(px):.1f},{sy(py):.1f}" for px, py in pts)
         out.append(f'<polyline points="{d}" fill="none" stroke="{color}" stroke-width="2"/>')
-        lx = left + i * 230
+        lx = left + i * min(230, (width - left - right) // len(series))
         out.append(f'<rect x="{lx}" y="{height - 16}" width="14" height="4" fill="{color}"/>')
         out.append(f'<text x="{lx + 20}" y="{height - 11}" fill="#111">{name}</text>')
     out.append("</svg>")
@@ -252,8 +255,9 @@ def main():
       "gets 12 vCPUs and 3.5 GB. Locust runs on the same machine, so the load generator and the "
       "system under test compete for the same cores. These are this laptop's numbers, not a "
       "capacity figure for the design.")
-    w("- **Stack:** the Phase 13/15 Compose stack as committed — one Uvicorn process, SQLAlchemy's "
-      "default pool of 5 + 10 connections, one worker.")
+    w("- **Stack:** the Phase 13/15 Compose stack — one Uvicorn process, SQLAlchemy's default "
+      "pool of 5 + 10 connections, one worker. The `w2_` runs came later, after the API's "
+      "default became two Uvicorn processes (`WEB_CONCURRENCY=2`); everything else is identical.")
     w(f"- **Data:** the Phase 14 dataset. Reads go to the 20 `bench-NN@taskflow.local` accounts, "
       f"which own ~200K rows between them (~{db['user_rows']:,} each). Submissions go to 50 "
       "dedicated `loadtest-NN@taskflow.local` accounts, so the Phase 14 dataset isn't modified.")
@@ -352,13 +356,24 @@ def main():
             w(f"| `{name}` | {int(r['Request Count']):,} | {float(r['Requests/s']):.1f} | {ms(r['50%'])} "
               f"| {ms(r['95%'])} | {ms(r['99%'])} | {ms(r['Max Response Time'])} |")
         w("")
-    u10_probe = [(t, float(m)) for t, m in probe("u10") if m != "error"]
-    slowest_probe = max(m for _, m in u10_probe)
-    w(f"At 10 users the p99 is set by a handful of slow requests out of ~{int(stats('u10')['Aggregated']['Request Count'])}. "
-      f"The `/health` probe saw the same moment (one response of {ms(slowest_probe)}), so it was "
-      "on the server, not in Locust. Its cause is **unexplained**. It overlapped a Postgres "
-      "checkpoint that fsynced ~1,700 files, but forcing one that fsynced ~1,100 files over "
-      "1.7 s while probing left `/health` under 10 ms, so that hypothesis is refuted.\n")
+    w("### The tail below saturation is brief server stalls\n")
+    w("Below saturation, p99 and max are set by moments when the server paused. The `/health` "
+      "probe — a separate process — saw each of them too, so they happened on the server, not "
+      "in Locust. Probe responses over 1 s in each run:\n")
+    w("| Run | Probe responses over 1 s | Locust p99 | Locust max |")
+    w("|---|---|---|---|")
+    for label in ("u10", "u100", "w2_u10", "w2_u100"):
+        slow = [float(m) for _, m in probe(label) if m != "error" and float(m) > 1000]
+        a = stats(label)["Aggregated"]
+        w(f"| `{label}` | {', '.join(ms(s) for s in slow) or 'none'} | {ms(a['99%'])} | {ms(a['Max Response Time'])} |")
+    w("\nOne 2 s pause with ~100 requests in flight is enough to set the p99 of a 2-minute run, "
+      "so these tails compare stalls, not configurations — the medians are the comparable part. "
+      "The cause is **unexplained**. A Postgres checkpoint is refuted: forcing one that fsynced "
+      "~1,100 files over 1.7 s while probing left `/health` under 10 ms. Memory pressure looks "
+      "unlikely: the VM-wide memory-stall counter and swap-outs didn't move across the whole "
+      "`w2_u1000` run (`raw/w2_u1000_pressure.txt`) — though that run was saturated, so the probe "
+      "can't show whether it contained a stall. The I/O-stall counter rose by ~1 s over the same "
+      "run, which is suggestive, not proof.\n")
 
     # ---------------------------------------------------------------- §3
     total, by_lib, notable = profile_summary()
@@ -389,17 +404,19 @@ def main():
     w("\nThe API runs at roughly one core of Python bytecode plus the work that runs outside the "
       "GIL. Postgres is mostly idle and is almost never *running* a query when sampled. The "
       "worker, Redis and the queue are nowhere near busy.\n")
-    w("**Tested, not assumed:** the same image with 4 Uvicorn processes (`WEB_CONCURRENCY=4`, "
-      "an experiment, not committed):\n")
+    w("**Tested, not assumed:** the same image with more Uvicorn processes (`WEB_CONCURRENCY`). "
+      "Four was an experiment; two is the default since:\n")
     w("| Uvicorn processes | req/s | p50 | p95 | Failed | API CPU | Postgres CPU | API CPU per request |")
     w("|---|---|---|---|---|---|---|---|")
-    for label, n in (("u1000", 1), ("exp_workers4_u1000", 4)):
+    for label, n in (("u1000", 1), ("w2_u1000", 2), ("exp_workers4_u1000", 4)):
         a, srv = stats(label)["Aggregated"], steady_server(label)
         cpu = median_of(srv, "cpu_api")
         w(f"| {n} | {float(a['Requests/s']):.0f} | {ms(a['50%'])} | {ms(a['95%'])} | {a['Failure Count']} "
           f"| {cpu:.0f}% | {median_of(srv, 'cpu_postgres'):.0f}% | ~{cpu / 100 * 1000 / float(a['Requests/s']):.0f} ms |")
-    w(f"\nThroughput rose {float(w4['Requests/s']) / float(u1000['Requests/s']):.1f}× — so the single "
-      "process was the ceiling. Not 4×, because CPU per request grew too. With 6 physical cores "
+    w2 = stats("w2_u1000")["Aggregated"]
+    w(f"\nThroughput rose {float(w2['Requests/s']) / float(u1000['Requests/s']):.2f}× with two "
+      f"processes and {float(w4['Requests/s']) / float(u1000['Requests/s']):.1f}× with four — so the "
+      "single process was the ceiling. Not linear, because CPU per request grew too. With 6 physical cores "
       "shared by four API processes, Postgres, Locust and Windows, that's consistent with work "
       "landing on busy hyperthreads. Past this point the numbers describe the laptop, not the "
       "design, so this was the last experiment.\n")
@@ -407,6 +424,7 @@ def main():
                    "1,000 users: completed requests per second (5 s average)",
                    [("before the fix", rps_series("before_u1000")),
                     ("after, 1 process", rps_series("u1000")),
+                    ("after, 2 processes", rps_series("w2_u1000")),
                     ("after, 4 processes", rps_series("exp_workers4_u1000"))], "req/s")
     w("![1,000 users](phase17/throughput_u1000.svg)\n")
 
@@ -470,10 +488,10 @@ def main():
       "need an endpoint that bypasses the cap and the database.")
     w("- **No load shedding.** A queue that only grows is not a strategy for sustained overload. "
       "A bound on waiting requests, answered with 503, would be the next step.")
-    w("- **Levers not pulled**, in rough order of effort: more Uvicorn processes (measured above; "
-      "each needs its own 15 connections against Postgres's 100); dropping the per-page "
-      "`COUNT(*)`; fewer ORM round trips per request; async endpoints, which avoid threadpool "
-      "trips altogether and are the largest change.")
+    w("- **Levers**, in rough order of effort: more Uvicorn processes — two is now the default; "
+      "more fit a bigger host, each needing its own 15 connections against Postgres's 100. Not "
+      "pulled: dropping the per-page `COUNT(*)`; fewer ORM round trips per request; async "
+      "endpoints, which avoid threadpool trips altogether and are the largest change.")
 
     OUT.write_text("\n".join(L) + "\n", encoding="utf-8")
     print(f"wrote {OUT.relative_to(BENCH.parent)} and 2 charts")

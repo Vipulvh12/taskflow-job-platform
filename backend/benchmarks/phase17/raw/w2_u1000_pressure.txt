@@ -1,0 +1,11 @@
+# VM-wide pressure-stall counters (cumulative microseconds of "full" stall) and
+# swap-outs, read from a container just before and just after the w2_u1000 run.
+# Copied verbatim from `grep full /proc/pressure/{memory,io}; grep pswpout /proc/vmstat`.
+## before
+memory: full avg10=0.00 avg60=0.00 avg300=0.00 total=14109002
+io:     full avg10=0.01 avg60=0.02 avg300=0.08 total=222928773
+pswpout 19148
+## after
+memory: full avg10=0.00 avg60=0.00 avg300=0.00 total=14109002
+io:     full avg10=0.00 avg60=0.00 avg300=0.02 total=223975333
+pswpout 19148
