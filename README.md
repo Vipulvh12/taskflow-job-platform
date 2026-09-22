@@ -19,7 +19,7 @@ ephemeral state (idempotency keys, rate limiting, later: worker heartbeats).
 
 ## Status
 
-**MVP complete (Phases 1–14), V2 in progress.** The whole system runs from
+**Feature-frozen as of 2026-09-22** (MVP: Phases 1–14; V2: Phases 15–17 and hardening). The whole system runs from
 `docker compose up`, is covered by a 99-test suite against real infrastructure,
 has benchmarked indexes, recovers automatically from a worker dying mid-job
 (Phase 15), and gives admins a dead-letter view with manual retry (Phase 16). It
@@ -719,11 +719,28 @@ eight real connections in contention on the unique constraint.
 
 | Service | Image | Notes |
 |---|---|---|
-| `postgres` | postgres:16 | published on host **5433** (a native Postgres owns 5432 here) |
-| `redis` | redis:7 | db 0 for the app, db 1 for tests |
-| `rabbitmq` | rabbitmq:3-management | UI at :15672 |
-| `api` | built, `target: api` | migrates, then serves on :8000 |
+| `postgres` | postgres:16 | published on **127.0.0.1:5433** only (a native Postgres owns 5432 here) |
+| `redis` | redis:7 | 127.0.0.1:6379 only; db 0 for the app, db 1 for tests |
+| `rabbitmq` | rabbitmq:3-management | 127.0.0.1:5672 only; UI at 127.0.0.1:15672 |
+| `api` | built, `target: api` | migrates, then serves on :8000 (all interfaces), 2 processes |
 | `worker` | built, `target: worker` | consumes; scale with `--scale worker=N` |
+| `reaper` | built, `target: worker` | requeues abandoned `RUNNING` jobs |
+
+### Network exposure and secrets
+
+- **The datastores' host ports listen on `127.0.0.1` only.** Before, they
+  listened on every interface, and all four ports answered on both of this
+  machine's network addresses. Now those addresses refuse them, while localhost
+  works. Containers never used the host ports; they reach each other by service
+  name over the Compose network (`postgres:5432`, `redis:6379`, `rabbitmq:5672`).
+- **The API's :8000 is still published on all interfaces** — the one service
+  meant to be reached.
+- **Real secrets live only in the gitignored `.env` and `.env.host`.** That means
+  `JWT_SECRET` (never committed) and the dev Postgres password. The Postgres
+  password used to be `.env.example`'s example value, from the first commit on.
+  It has been rotated, the server rejects the old value, and the value is still
+  in git history. `.env.example` holds placeholders. `backend/.env.test` holds
+  only the throwaway test role's credentials, committed on purpose.
 
 One Dockerfile with a shared `deps` stage and two thin final stages. The API and
 worker import the same `app` package and need identical dependencies; installing
@@ -1029,21 +1046,31 @@ install requirements-dev.txt
   Redis 7 and RabbitMQ 3 service containers: the `docker-compose.yml` images,
   on the ports `backend/.env.test` expects. Each has a healthcheck, which GitHub
   waits on before running steps.
-- **CI's Postgres uses a throwaway password.** `pytest.ini` lets `.env.test`
-  override the environment (a safety rail), so the job rewrites `DATABASE_URL`
-  in its own checkout. The conftest checks (database `taskflow_test`, Redis db 1)
-  still apply.
+- **CI's Postgres uses the throwaway test credentials** committed in
+  `backend/.env.test` (the `taskflow_test` role), in a container that exists
+  only for the job. The conftest checks (database `taskflow_test`, Redis db 1)
+  apply there as locally.
 - **Lint checks for bugs, not style.** `ruff.toml` selects pyflakes plus
   pycodestyle's error checks explicitly, so a ruff upgrade can't change what CI
   enforces. Its first run found four model names used only in `Mapped["..."]`
   annotations, now imported under `TYPE_CHECKING`, and an unused test variable.
 
-**Status: not yet run on GitHub.** This repository has no remote. The workflow
-passes `actionlint`, and every step was re-enacted locally in a fresh `git clone`
-against service containers started with the workflow's exact images, credentials,
-ports and healthchecks: lint clean, 3 migrations applied and no drift, **99
-passed**, both images built. Linux-specific details (the runner's shell,
-`setup-python`'s cache) can only be confirmed by the first real run.
+**Status: passing on GitHub.** The first passing run was
+[#35711246452](https://github.com/Vipulvh12/taskflow-job-platform/actions/runs/35711246452),
+on commit `6e118e8`, in about 2 minutes. Its log shows:
+
+- lint: `All checks passed!`
+- migrations: 3 applied to an empty database, then `No new upgrade operations detected.`
+- tests: `99 passed, 2 warnings in 36.06s`
+- images: `taskflow-api:ci` and `taskflow-worker:ci` built
+
+The run before it failed, and the local re-enactment hadn't caught why. The
+workflow runs the plain `pytest` command, which, unlike `python -m pytest`,
+doesn't put `backend/` on `sys.path`, so `import app` failed at collection. The
+re-enactment had used `python -m pytest`. Fixed in `pytest.ini`
+(`pythonpath = .`), so both forms work. The 2 warnings are a library deprecation
+notice (Starlette's test client and `httpx`) and a test that signs a token with a
+deliberately short wrong key.
 
 ## Known limitations and future work
 
@@ -1076,4 +1103,6 @@ passed**, both images built. Linux-specific details (the runner's shell,
 - **Login throughput is untested.** The load test mints tokens (see above).
 - **Single-node datastores.** One Postgres, one Redis and one RabbitMQ, with no
   replication — in scope for a one-host deployment, not beyond it.
-- **CI hasn't run on GitHub yet** (see above).
+- **Dependencies aren't pinned.** `requirements.txt` uses `>=` ranges and there
+  is no lockfile, so CI installs the newest compatible releases. A future release
+  can break a build with no change to this repository.
