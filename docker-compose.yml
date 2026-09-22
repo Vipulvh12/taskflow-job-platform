@@ -5,10 +5,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    # Host ports for the datastores are bound to 127.0.0.1: reachable from this
+    # machine (host-side tools, pytest), not from the network. A bare "5433:5432"
+    # listens on every interface. Containers never use these — they talk over
+    # the Compose network by service name (postgres:5432, redis:6379, ...).
     ports:
       # Host 5433 because a native PostgreSQL service already owns 5432 on this
       # machine. Inside the Compose network the port is still 5432.
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +25,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -40,8 +44,8 @@ services:
     # the messages) and rabbit@20405d1f4820 (empty, the one running).
     hostname: rabbitmq
     ports:
-      - "5672:5672"   # AMQP protocol port
-      - "15672:15672" # management UI (http://localhost:15672, guest/guest)
+      - "127.0.0.1:5672:5672"   # AMQP protocol port
+      - "127.0.0.1:15672:15672" # management UI (http://localhost:15672, guest/guest)
     volumes:
       # Named, not left to the image's own VOLUME. The image declares
       # /var/lib/rabbitmq as a volume, so without this Docker creates an

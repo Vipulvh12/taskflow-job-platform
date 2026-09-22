@@ -13,10 +13,14 @@ import json
 import os
 import statistics
 import sys
+from pathlib import Path
 
 import psycopg2
+from dotenv import dotenv_values
 
-DSN = "postgresql://taskflow:taskflow_dev_password@localhost:5433/taskflow"
+# The host-side URL (127.0.0.1:5433) from the gitignored .env.host, so no
+# credential lives in the repository.
+DSN = dotenv_values(Path(__file__).resolve().parents[2] / ".env.host")["DATABASE_URL"]
 RUNS = 7  # first is reported separately as "cold"; median of the rest is "warm"
 
 # Copied verbatim from what job_service.list_jobs compiles to (Phase 14 captured

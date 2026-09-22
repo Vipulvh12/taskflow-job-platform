@@ -45,7 +45,7 @@ already-current database is a no-op, not an error.
 
 `.env` holds the **Docker-network** hostnames (`postgres`, `redis`, `rabbitmq`)
 because that is what a container on the Compose network needs. `.env.host` keeps
-the `localhost` equivalents for running the API or worker directly:
+the `127.0.0.1` equivalents for running the API or worker directly:
 
 ```bash
 cd backend
@@ -54,7 +54,7 @@ uvicorn app.main:app --reload --port 8000
 python -m worker.main
 ```
 
-`.env.test` stays on `localhost` regardless — pytest runs on the host, not in a
+`.env.test` stays on `127.0.0.1` regardless — pytest runs on the host, not in a
 container.
 
 ### Startup ordering
@@ -489,11 +489,16 @@ Then edit `.env` to point at the **published host ports** rather than the
 Docker-network hostnames — the backend runs on your machine until Phase 13:
 
 ```
-DATABASE_URL=postgresql://taskflow:taskflow_dev_password@localhost:5433/taskflow
-REDIS_URL=redis://localhost:6379/0
-RABBITMQ_URL=amqp://guest:guest@localhost:5672/
+DATABASE_URL=postgresql://taskflow:<your POSTGRES_PASSWORD>@127.0.0.1:5433/taskflow
+REDIS_URL=redis://127.0.0.1:6379/0
+RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
 ```
 
+> Use `127.0.0.1`, not `localhost`: the datastores' host ports are bound to
+> IPv4 loopback only, and on Windows `localhost` tries `::1` first, stalling
+> ~2 s per new connection before falling back (measured: 2,050–2,090 ms vs
+> 16–30 ms).
+>
 > Postgres is published on host port **5433**, not 5432, because a natively
 > installed PostgreSQL service already owns 5432 on this machine. Inside the
 > Compose network the port is still 5432, which is why `.env.example` keeps
@@ -649,9 +654,17 @@ not a silently dropped value.
 
 ```bash
 cd backend
-docker exec taskflow-postgres-1 psql -U taskflow -d taskflow -c "CREATE DATABASE taskflow_test;"  # once
+# once: a test-only role that owns the test database and can't connect to the dev one
+docker exec taskflow-postgres-1 psql -U taskflow -d taskflow \
+  -c "CREATE ROLE taskflow_test LOGIN PASSWORD 'taskflow_test_only';" \
+  -c "CREATE DATABASE taskflow_test OWNER taskflow_test;" \
+  -c "REVOKE CONNECT ON DATABASE taskflow FROM PUBLIC;"
 pytest -q
 ```
+
+The test credentials in `backend/.env.test` are throwaway and committed on
+purpose, for CI and for a fresh clone. The dev database's real password lives
+only in the gitignored `.env` and `.env.host`.
 
 99 tests, ~110s, against **real** infrastructure rather than mocks. That is a
 deliberate choice: the two hardest bugs in this project so far — the idempotency
